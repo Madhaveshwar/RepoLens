@@ -1,0 +1,71 @@
+services:
+  # 1. FastAPI Web Server
+  - type: web
+    name: acr-backend
+    env: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: acr-postgres
+          property: connectionString
+      - key: SYNC_DATABASE_URL
+        fromDatabase:
+          name: acr-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: cache
+          name: acr-redis
+          property: connectionString
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+
+  # 2. Celery Asynchronous Worker
+  - type: worker
+    name: acr-worker
+    env: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: celery -A backend.app.tasks.tasks.celery_app worker --loglevel=info
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: acr-postgres
+          property: connectionString
+      - key: SYNC_DATABASE_URL
+        fromDatabase:
+          name: acr-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: cache
+          name: acr-redis
+          property: connectionString
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: JWT_SECRET
+        fromService:
+          type: web
+          name: acr-backend
+          property: envVar:JWT_SECRET
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+
+# 3. Redis Cache/Broker (Render Cache Service)
+cache:
+  name: acr-redis
+  plan: free
+
+# 4. PostgreSQL Managed Database
+databases:
+  - name: acr-postgres
+    plan: free

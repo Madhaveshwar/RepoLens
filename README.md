@@ -1,136 +1,169 @@
-# AI Code Reviewer with GitHub Integration
+# AI Code Reviewer with GitHub Integration (Enterprise Full-Stack Architecture)
 
-An advanced AI-powered code review assistant that automates pull request analysis, vulnerability scanning, code quality reviews, test generation, and repository health scoring.
+An enterprise-grade, asynchronous full-stack platform that automates pull request auditing, security vulnerability checks, code smell detection, test generation, and repository health analytics.
 
----
-
-## 🚀 Resume Profile Ready
-
-### **Project Title:**
-AI Code Reviewer with GitHub Integration
-
-### **Description:**
-Created an AI-powered code review assistant integrated with GitHub for automated pull request analysis, security vulnerability detection, code smell identification, test case generation, inline review comments, severity scoring, and repository health analysis using the Groq API, Streamlit, PyGithub, and LangSmith.
+This architecture upgrades the original Streamlit application into a microservice-ready system featuring a React 19 SPA, a FastAPI async backend, PostgreSQL database persistence, Redis cache caching, and a background Celery worker queue.
 
 ---
 
-## 🌟 Key Features
+## 🏗️ Target Architecture Overview
 
-1. **GitHub Repository Integration**
-   - Seamlessly connect to public or private repositories via GitHub Personal Access Tokens (PAT).
-   - Display real-time metadata including Stars, Forks, Open PRs, and language metrics.
+The system is decoupled into isolated layers:
+*   **Frontend:** React 19, TypeScript, Vite, TailwindCSS, Zustand (global state), TanStack React Query (data fetching), Monaco Code Editor (diffing and snippet review), and Recharts (SaaS analytics dashboards).
+*   **Backend:** FastAPI (async REST routes + WebSockets for live progress tracking), Pydantic (data parsing).
+*   **Database:** PostgreSQL (persistence of connected repos, PRs, scans history, security findings, code smells).
+*   **Caching & Broker:** Redis (Celery broker, caching, Pub/Sub channels for WebSocket streams).
+*   **Background Worker:** Celery (concurrent repository recursion, AI reviews parsing, report creation).
+*   **Security:** AES-256 symmetric encryption for user access PATs and Groq Keys using Fernet.
 
-2. **Automated Pull Request Reviews**
-   - Fetch and select from list of open pull requests.
-   - Extract changed files and diff patches to target review assessments only on modified lines.
-   - Show PR statistics (Author, Title, Added/Deleted lines, Files Changed).
-
-3. **Advanced AI Multi-Scanner Engine**
-   - Orchestrated using the Groq API (`llama-3.3-70b-versatile`).
-   - Runs concurrent review pipelines: Logic & Bugs, Security Audits, and Code Smells.
-   - Classifies findings dynamically using severity levels: *Critical, High, Medium, Low, Info*.
-
-4. **Code Smell & Anti-Pattern Detection**
-   - Scans for long functions, duplicate/dead code, nesting, naming violations, and magic numbers.
-
-5. **Deep Security Auditing**
-   - Spot vulnerability patterns: SQL Injection, XSS, Command Injection, hardcoded secrets, weak auth, and insecure deserialization.
-
-6. **Automated Test Suggestions**
-   - Generates boilerplate code and blueprints for Unit Tests, Integration Tests, Edge Cases, and Negative Tests.
-
-7. **Interactive Comment Posting & Inline Comments**
-   - Generate standard inline review format comments.
-   - Post overall PR summary reviews to GitHub discussion timelines.
-   - Post inline comments directly to the specific file lines inside GitHub's PR file diff view.
-
-8. **Repository Structure & Health Scoring**
-   - Traversing Git trees recursively to calculate a Repository Health Score out of 100.
-   - Flags missing documentation (README), large files (>500KB), vulnerable dependencies, and un-tested security hotspots.
-
-9. **Premium PDF, Markdown, & JSON Export**
-   - Generates beautifully styled PDF reports using `fpdf2` with a robust text encoder to prevent Unicode errors.
-   - Export structured raw findings in JSON or formatted Markdown documentation.
-
-10. **LangSmith Trace Integrations**
-    - Traces operational logic (Prompt, Repository, PR Number, AI Review Result, Latency, and estimated tokens) using LangSmith's `@traceable` pipelines.
+```mermaid
+graph TD
+    Client[React 19 Frontend] <-->|REST HTTP / WebSockets| API[FastAPI Backend]
+    API <--> DB[(PostgreSQL)]
+    API <--> Redis[(Redis Cache / Broker)]
+    API -->|Queue Job| Worker[Celery Worker]
+    Worker <--> DB
+    Worker -->|Fetch PR / Repository| GitHub[GitHub API]
+    Worker -->|Execute AI Scan| Groq[Groq API]
+```
 
 ---
 
-## 📁 Project Structure
-
-Root layout:
+## 📁 Project Directory Structure
 
 ```text
-├── app.py                   # Main Streamlit dashboard application UI
-├── github_service.py        # PyGithub wrapper for repo stats, PR details, and comments
-├── reviewer.py              # Orchestration manager coordinating all review engines
-├── security_scanner.py      # Specialised AI Security scanner targeting vulnerabilities
-├── code_smell_detector.py  # Code quality scanner identifying anti-patterns & smells
-├── test_generator.py        # Test suggestion engine proposing QA cases
-├── repository_analyzer.py   # Tree parser scoring repository health & documentation
-├── report_generator.py      # PDF, Markdown, and JSON file generation suite
+├── backend/
+│   ├── app/
+│   │   ├── auth/            # JWT Token generation, hashing, AES-256 encryption
+│   │   ├── database/        # Async/Sync connection settings and Base
+│   │   ├── models/          # SQLAlchemy Database Models (User, Repo, PR, Finding...)
+│   │   ├── schemas/         # Pydantic serialization schemas
+│   │   ├── services/        # Relocated Prompt and Review engines (PyGithub, Groq)
+│   │   ├── routers/         # Endpoint modules (auth, users, repositories, analysis...)
+│   │   ├── tasks/           # Asynchronous Celery task files
+│   │   ├── websockets/      # Live Redis Pub/Sub WebSocket handlers
+│   │   ├── utils/           # Validation checks and prompt templates
+│   │   ├── config.py        # Settings configuration loader
+│   │   └── main.py          # FastAPI application entrypoint
+│   ├── Dockerfile
+│   └── requirements.txt     # Python backend dependencies
 │
-├── utils/
-│   ├── __init__.py
-│   ├── prompts.py           # Contains prompt templates for all analysis models
-│   └── validation.py        # Heuristics checking if inputs are programming code
-├── prompts/
-├── templates/
-├── exports/                 # Cache folder storing downloaded PDF reports
-└── requirements.txt         # Project dependencies
+├── frontend/
+│   ├── src/
+│   │   ├── components/      # UI components, Sidebar, Monaco layout
+│   │   ├── pages/           # Login, Register, Dashboard, Repo Detail, settings, snippet review
+│   │   ├── store/           # Zustand state managers (auth, repos, analyses)
+│   │   ├── App.tsx          # Client router
+│   │   └── main.tsx
+│   ├── tailwind.config.js
+│   ├── tsconfig.json
+│   ├── vite.config.ts
+│   ├── package.json
+│   └── Dockerfile
+│
+├── .github/
+│   └── workflows/
+│       └── ci-cd.yml        # CI/CD test automation runner
+│
+├── docker-compose.yml       # Orchestrates all full-stack services
+├── .env.example             # Template for variables setup
+└── README.md                # System documentation
 ```
 
 ---
 
-## 🛠️ Prerequisites
+## 🔑 Security and Key Management
 
-- Python 3.10 to 3.12
-- A Groq API Key
-- A GitHub Personal Access Token (PAT) with `repo` scope (for PR integrations)
-- A LangSmith API Key (Optional, for execution tracing)
+User-supplied credentials (GitHub PAT and Groq API Key) are secured:
+1.  **Encryption:** When submitted on the `/settings` page, the keys are encrypted on the server using AES-256 symmetric encryption (Fernet).
+2.  **Storage:** Only the encrypted strings are persisted in the PostgreSQL database.
+3.  **Decryption:** Keys are decrypted on-the-fly inside Celery worker memory only when executing active review scans.
+4.  **Master Key:** Make sure to set a safe 32-byte URL-safe base64 `ENCRYPTION_KEY` in your `.env`.
 
 ---
 
-## 🔧 Environment Setup
+## ⚙️ Environment Configuration
 
-Create a `.env` file in the root workspace directory:
+Create a `.env` file in the root workspace directory before starting services:
 
 ```env
-# Groq API Key Setup
-GROQ_API_KEY=your_groq_api_key
+# Database Settings
+DATABASE_URL=postgresql+asyncpg://reviewer_user:reviewer_password@postgres/code_reviewer
+SYNC_DATABASE_URL=postgresql://reviewer_user:reviewer_password@postgres/code_reviewer
 
-# GitHub Token (Optional default)
-GITHUB_TOKEN=your_github_personal_access_token
+# Caching & Queue Broker
+REDIS_URL=redis://redis:6379/0
 
-# LangSmith Setup (Optional)
-LANGCHAIN_API_KEY=your_langsmith_api_key
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_PROJECT=Automated_Code_Reviewer
+# Master Encryption Key (32-byte URL-safe base64 key)
+ENCRYPTION_KEY=u-3M1t-H3VnJzLox58pZf4lX3z4P4hGZ8Z0K2S-2U_w=
+
+# JWT JWT_SECRET
+JWT_SECRET=super_secret_jwt_sign_key_change_me_in_prod_1234567890
+
+# Optional Server-wide Fallback Credentials
+GITHUB_TOKEN=your_global_github_token
+GROQ_API_KEY=your_global_groq_key
 ```
 
 ---
 
-## 🚀 Installation & Launch
+## 🚀 Getting Started with Docker Compose
 
-1. Clone this repository or open the project folder.
-2. Setup a virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows use: venv\Scripts\activate
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Run the Streamlit dashboard using the launcher:
-   ```bash
-   python run.py
-   ```
-   *Alternative:*
-   ```bash
-   streamlit run app.py
-   ```
+Running the entire system inside Docker containers is the recommended option for local testing and production deployments.
+
+### Prerequisites
+*   Docker and Docker Compose installed.
+
+### Launching Services
+To spin up all services (PostgreSQL, Redis, Backend, Celery Worker, Frontend), run:
+
+```bash
+docker-compose up --build
+```
+
+### Accessing the Applications
+*   **React Frontend:** Open `http://localhost:3000` in your web browser.
+*   **FastAPI Documentation:** View fully documented routes at `http://localhost:8000/docs`.
+
+---
+
+## 🛠️ Local Development (Non-Docker Setup)
+
+If you prefer executing services locally outside containers, you must run PostgreSQL and Redis on your local machine.
+
+### 1. Backend Setup
+```bash
+cd backend
+python -m venv venv
+source venv/Scripts/activate  # On Unix use: source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+### 2. Celery Worker Setup
+Ensure Redis is active, then launch worker from the `backend/` directory:
+```bash
+celery -A app.tasks.tasks.celery_app worker --loglevel=info
+```
+
+### 3. Frontend Setup
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open the Dev Server at `http://localhost:5173`.
+
+---
+
+## 🧪 Running Unit Tests
+
+Unit tests are implemented inside the `backend/app/tests` package. To verify logic using SQLite in-memory connections:
+
+```bash
+cd backend
+pytest
+```
 
 ---
 

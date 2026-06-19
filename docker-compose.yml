@@ -1,0 +1,162 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: acr_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: code_reviewer
+      POSTGRES_USER: reviewer_user
+      POSTGRES_PASSWORD: reviewer_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - acr_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reviewer_user -d code_reviewer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: acr_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - acr_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    build: ./backend
+    container_name: acr_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: >
+      sh -c "alembic -c alembic.ini upgrade head &&
+             uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    volumes:
+      - reports_storage:/backend/storage
+    ports:
+      - "8000:8000"
+    environment:
+      # Database connections – internal Docker network hostnames
+      - DATABASE_URL=postgresql+asyncpg://reviewer_user:reviewer_password@postgres:5432/code_reviewer
+      - SYNC_DATABASE_URL=postgresql://reviewer_user:reviewer_password@postgres:5432/code_reviewer
+      # Redis – internal Docker network
+      - REDIS_URL=redis://redis:6379/0
+      # Security secrets – pulled from host .env file
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      # LLM provider keys (fallbacks; per-user keys take precedence)
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # GitHub
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_APP_ID=${GITHUB_APP_ID:-}
+      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY:-}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      # CORS
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:5173,http://localhost:3000,http://localhost:8000}
+      # Observability
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
+      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-Automated_Code_Reviewer}
+      # Flags
+      - FORCE_GROQ_ANALYSIS=${FORCE_GROQ_ANALYSIS:-false}
+      - PYTHONPATH=/:/backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - acr_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  celery_worker:
+    build: ./backend
+    container_name: acr_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: celery -A backend.app.tasks.tasks.celery_app worker --loglevel=info --concurrency=2 -Q celery,dead_letter
+    volumes:
+      - reports_storage:/backend/storage
+    environment:
+      # Database connections
+      - DATABASE_URL=postgresql+asyncpg://reviewer_user:reviewer_password@postgres:5432/code_reviewer
+      - SYNC_DATABASE_URL=postgresql://reviewer_user:reviewer_password@postgres:5432/code_reviewer
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      # Security secrets
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      # LLM provider keys
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # GitHub
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_APP_ID=${GITHUB_APP_ID:-}
+      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY:-}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      # Observability
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
+      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-Automated_Code_Reviewer}
+      # Flags
+      - FORCE_GROQ_ANALYSIS=${FORCE_GROQ_ANALYSIS:-false}
+      - PYTHONPATH=/:/backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - acr_network
+
+  frontend:
+    build: ./frontend
+    container_name: acr_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - acr_network
+
+volumes:
+  pgdata:
+  redis_data:
+  reports_storage:
+
+networks:
+  acr_network:
+    driver: bridge

@@ -1,78 +1,34 @@
-"""Report generator module supporting exports to Markdown, JSON, and PDF."""
-
-from __future__ import annotations
-
 import json
-import sys
-import os
+import csv
+import io
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-
-# Ensure the parent directory is on the search path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
+from datetime import datetime
 
 def clean_pdf_text(text: str) -> str:
-    """Sanitize text to be safe for FPDF Latin-1 encoding, replacing emojis and smart quotes."""
     if not text:
         return ""
-
     replacements = {
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2022": "*",
-        "\u2192": "->",
-        "\u2714": "[Yes]",
-        "\u2716": "[No]",
-        "🐍": "Python",
-        "🟨": "JS",
-        "🔷": "TS",
-        "☕": "Java",
-        "⚙️": "C/C++",
-        "🦀": "Rust",
-        "🐘": "PHP",
-        "🐹": "Go",
-        "🍎": "Swift",
-        "🌐": "HTML/CSS",
-        "🚀": "Launch",
-        "⚠️": "Warning",
-        "🛑": "Error",
-        "✅": "OK",
-        "❌": "Fail",
-        "📁": "Folder",
-        "📄": "File",
-        "💡": "Tip",
-        "🔍": "Scan",
-        "📊": "Chart",
-        "🛡️": "Security",
-        "💯": "100",
-        "⭐": "Star",
-        "🍴": "Fork",
+        "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "\u2013": "-", "\u2014": "-",
+        "\u2022": "*", "\u2192": "->", "\u2714": "[Yes]", "\u2716": "[No]", "🐍": "Python",
+        "🟨": "JS", "🔷": "TS", "☕": "Java", "⚙️": "C/C++", "🦀": "Rust", "🐘": "PHP",
+        "🐹": "Go", "🍎": "Swift", "🌐": "HTML/CSS", "🚀": "Launch", "⚠️": "Warning",
+        "🛑": "Error", "✅": "OK", "❌": "Fail", "📁": "Folder", "📄": "File", "💡": "Tip",
+        "🔍": "Scan", "📊": "Chart", "🛡️": "Security", "💯": "100", "⭐": "Star", "🍴": "Fork",
     }
     for k, v in replacements.items():
         text = text.replace(k, v)
-
-    # Convert to latin-1 encoding, replacing unmappable characters with '?'
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
-
 class PDFReport(FPDF):
-    """FPDF subclass to create premium PDF reports."""
-
     def __init__(self, repo_name: str, pr_number: int | None = None):
         super().__init__()
         self.repo_name = repo_name
         self.pr_number = pr_number
 
     def header(self):
-        """Render page header."""
-        self.set_fill_color(15, 23, 42)  # Dark slate background
+        self.set_fill_color(15, 23, 42)
         self.rect(0, 0, 210, 25, "F")
-
         self.set_text_color(255, 255, 255)
         self.set_font("Helvetica", "B", 12)
         self.set_y(8)
@@ -82,15 +38,12 @@ class PDFReport(FPDF):
         self.ln(20)
 
     def footer(self):
-        """Render page footer."""
         self.set_y(-15)
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(148, 163, 184)
         self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", border=0, align="C", new_x=XPos.RIGHT, new_y=YPos.TOP)
 
-
 def generate_markdown_report(data: dict[str, object]) -> str:
-    """Generate a clean, readable Markdown report from the code review data."""
     repo_name = data.get("repo_name", "Local Scan")
     pr_number = data.get("pr_number")
     risk_score = data.get("risk_score", 0)
@@ -100,13 +53,7 @@ def generate_markdown_report(data: dict[str, object]) -> str:
     files_log = data.get("files_analyzed_log", [])
     scores = data.get("scores", {})
 
-    severity_counts = {
-        "Critical": 0,
-        "High": 0,
-        "Medium": 0,
-        "Low": 0,
-        "Info": 0,
-    }
+    severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
     for f in findings:
         sev = f.get("severity", "Info")
         if sev in severity_counts:
@@ -133,7 +80,6 @@ def generate_markdown_report(data: dict[str, object]) -> str:
         md.append(f"  - Performance Score: {scores.get('performance', 0)}/100")
         md.append(f"  - Technical Debt Score: {scores.get('technical_debt', 0)}/100\n")
 
-    # Files Analyzed Section
     if files_log:
         md.append("## Files Analyzed")
         md.append("| File | Type | Status | Findings |")
@@ -142,7 +88,6 @@ def generate_markdown_report(data: dict[str, object]) -> str:
             md.append(f"| `{item.get('file')}` | {item.get('type')} | {item.get('status')} | {item.get('findings')} |")
         md.append("\n")
 
-    # Grouped Findings Section
     if findings:
         md.append("## Findings Grouped By File")
         by_file = {}
@@ -212,9 +157,7 @@ def generate_markdown_report(data: dict[str, object]) -> str:
         md.append("| File | Line | Severity | Category | Issue | Suggestion |")
         md.append("| --- | --- | --- | --- | --- | --- |")
         for f in findings:
-            md.append(
-                f"| `{f.get('file')}` | {f.get('line')} | **{f.get('severity')}** | {f.get('category')} | {f.get('issue')} | {f.get('suggestion')} |"
-            )
+            md.append(f"| `{f.get('file')}` | {f.get('line')} | **{f.get('severity')}** | {f.get('category')} | {f.get('issue')} | {f.get('suggestion')} |")
         md.append("\n")
 
     if test_suggestions:
@@ -230,14 +173,33 @@ def generate_markdown_report(data: dict[str, object]) -> str:
 
     return "\n".join(md)
 
-
 def generate_json_report(data: dict[str, object]) -> str:
-    """Generate a formatted JSON string of the code review data."""
     return json.dumps(data, indent=2)
 
+def generate_csv_report(data: dict[str, object]) -> str:
+    findings = data.get("findings", [])
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Header
+    writer.writerow(["File", "Line", "Severity", "Category", "Issue", "Suggestion", "Why It Matters", "Before Code", "After Code"])
+    
+    # Rows
+    for f in findings:
+        writer.writerow([
+            f.get("file", ""),
+            f.get("line", ""),
+            f.get("severity", ""),
+            f.get("category", ""),
+            f.get("issue", ""),
+            f.get("suggestion", ""),
+            f.get("why_it_matters", ""),
+            f.get("before_code", ""),
+            f.get("after_code", "")
+        ])
+    return output.getvalue()
 
 def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
-    """Generate a styled PDF report using fpdf2."""
     repo_name = data.get("repo_name", "Local Scan")
     pr_number = data.get("pr_number")
     risk_score = data.get("risk_score", 0)
@@ -245,13 +207,7 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
     test_suggestions = data.get("test_suggestions", "")
     repo_analysis = data.get("repo_analysis", {})
 
-    severity_counts = {
-        "Critical": 0,
-        "High": 0,
-        "Medium": 0,
-        "Low": 0,
-        "Info": 0,
-    }
+    severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
     for f in findings:
         sev = f.get("severity", "Info")
         if sev in severity_counts:
@@ -261,7 +217,7 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
     pdf.alias_nb_pages()
     pdf.add_page()
 
-    # --- Title Section ---
+    # Title
     pdf.set_text_color(15, 23, 42)
     pdf.set_font("Helvetica", "B", 18)
     pdf.cell(0, 10, clean_pdf_text("Pull Request Code Review Report"), border=0, align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
@@ -270,8 +226,8 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
     pdf.cell(0, 6, clean_pdf_text(f"Generated on: {data.get('timestamp', 'N/A')}"), border=0, align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(5)
 
-    # --- Executive Summary Box ---
-    pdf.set_fill_color(248, 250, 252)  # Light slate surface
+    # Executive Summary Box
+    pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(226, 232, 240)
     pdf.rect(10, 42, 190, 45, "DF")
 
@@ -288,7 +244,7 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
     pdf.cell(0, 6, clean_pdf_text(f"Total Findings: {len(findings)} files scanned."), border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(18)
 
-    # --- Issues Table ---
+    # Key Findings Table
     pdf.set_text_color(15, 23, 42)
     pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 10, clean_pdf_text("Key Findings"), border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
@@ -299,7 +255,7 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
     else:
         # Table headers
         pdf.set_font("Helvetica", "B", 9)
-        pdf.set_fill_color(241, 245, 249)  # header bg
+        pdf.set_fill_color(241, 245, 249)
         pdf.cell(40, 7, clean_pdf_text("File"), border=1, align="L", fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
         pdf.cell(12, 7, clean_pdf_text("Line"), border=1, align="C", fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
         pdf.cell(18, 7, clean_pdf_text("Severity"), border=1, align="C", fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
@@ -308,11 +264,9 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
 
         pdf.set_font("Helvetica", "", 8.5)
         for i, f in enumerate(findings):
-            # Alternating rows
             fill = (i % 2 == 1)
             pdf.set_fill_color(248, 250, 252) if fill else pdf.set_fill_color(255, 255, 255)
 
-            # Limit string lengths for table format
             file_name = f.get("file", "")
             if len(file_name) > 22:
                 file_name = "..." + file_name[-19:]
@@ -323,23 +277,18 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
             suggestion = f.get("suggestion", "")
             issue_text = f"{issue}: {suggestion}"
 
-            # Calculate height needed for the last column (multi-line)
-            # Since cells must align, we can use multi_cell or clip text
-            # A simpler approach in fpdf is limiting text or using a fixed height cell.
-            # Let's truncate issue text if it is too long for the cell (approx 65 chars)
             if len(issue_text) > 65:
                 issue_text = issue_text[:62] + "..."
 
             pdf.cell(40, 7, clean_pdf_text(file_name), border=1, align="L", fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
             pdf.cell(12, 7, str(f.get("line", "")), border=1, align="C", fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
             
-            # Severity color text
             if severity in ["Critical", "High"]:
-                pdf.set_text_color(185, 28, 28)  # Red
+                pdf.set_text_color(185, 28, 28)
             elif severity == "Medium":
-                pdf.set_text_color(194, 65, 12)  # Orange
+                pdf.set_text_color(194, 65, 12)
             else:
-                pdf.set_text_color(15, 23, 42)  # Default
+                pdf.set_text_color(15, 23, 42)
             pdf.cell(18, 7, clean_pdf_text(severity), border=1, align="C", fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
             pdf.set_text_color(15, 23, 42)
 
@@ -347,7 +296,7 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
             pdf.cell(95, 7, clean_pdf_text(issue_text), border=1, align="L", fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(5)
 
-    # --- Files Analyzed ---
+    # Files Analyzed
     files_log = data.get("files_analyzed_log", [])
     if files_log:
         pdf.add_page()
@@ -378,7 +327,7 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
             pdf.cell(30, 7, str(item.get("findings", 0)), border=1, align="C", fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.ln(5)
 
-    # --- Grouped Findings ---
+    # Detailed Grouped findings
     if findings:
         pdf.add_page()
         pdf.set_text_color(15, 23, 42)
@@ -392,7 +341,7 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
 
         for fname, file_findings in by_file.items():
             pdf.set_font("Helvetica", "B", 10.5)
-            pdf.set_text_color(31, 111, 235)  # Accent blue
+            pdf.set_text_color(31, 111, 235)
             pdf.cell(0, 8, clean_pdf_text(f"File: {fname}"), border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             pdf.set_text_color(15, 23, 42)
 
@@ -450,7 +399,7 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
             pdf.ln(2)
         pdf.ln(5)
 
-    # --- Test suggestions ---
+    # Test Suggestions
     if test_suggestions:
         pdf.add_page()
         pdf.set_text_color(15, 23, 42)
@@ -458,22 +407,20 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
         pdf.cell(0, 10, clean_pdf_text("Test Suggestions"), border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font("Helvetica", "", 9.5)
         
-        # Parse and clean up markdown test suggestion blocks
         lines = test_suggestions.splitlines()
-        for line in lines[:80]: # limit lines to prevent page spill
+        for line in lines[:80]:
             if line.startswith("###"):
                 pdf.ln(3)
                 pdf.set_font("Helvetica", "B", 11)
                 pdf.cell(0, 6, clean_pdf_text(line.replace("###", "").strip()), border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                 pdf.set_font("Helvetica", "", 9.5)
             elif line.strip().startswith("```"):
-                # We skip code blocks or write them in Courier
                 pass
             else:
                 if line.strip():
                     pdf.write(5, clean_pdf_text(line) + "\n")
 
-    # --- Repo Health ---
+    # Repo Health Analysis
     if repo_analysis:
         pdf.add_page()
         pdf.set_text_color(15, 23, 42)
@@ -501,5 +448,4 @@ def generate_pdf_report(data: dict[str, object], output_filepath: str) -> None:
                 if line.strip():
                     pdf.write(5, clean_pdf_text(line) + "\n")
 
-    # Save to file
     pdf.output(output_filepath)

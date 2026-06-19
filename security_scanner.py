@@ -57,6 +57,24 @@ def parse_json_from_llm(content: str) -> list[dict]:
     return []
 
 
+def is_potential_secret_default(line: str) -> bool:
+    match = re.search(r",\s*(['\"])(.*?)\1\s*\)", line)
+    if match:
+        fallback_val = match.group(2)
+        safe_defaults = {
+            "dev", "development", "prod", "production", "local", "localhost",
+            "test", "testing", "default", "sqlite:///test.db", "postgresql://",
+            "mysql://", "mongodb://", "redis://", "0.0.0.0", "127.0.0.1", "", "none"
+        }
+        if fallback_val.lower() in safe_defaults or len(fallback_val) <= 6:
+            return False
+        if any(kw in fallback_val.lower() for kw in ["key", "secret", "password", "token", "auth", "pwd"]):
+            return True
+        if re.match(r"^[A-Za-z0-9_\-\+]{8,}$", fallback_val):
+            return True
+    return False
+
+
 @traceable(name="Security Scan")
 def scan_security(
     client: Any,
@@ -100,12 +118,37 @@ def scan_security(
 
     # Ensure findings match target schema and have valid properties
     validated_findings = []
+    code_lines = code.splitlines()
     for item in findings:
         if isinstance(item, dict):
+            line_val = int(item.get("line", 1)) if str(item.get("line")).isdigit() else 1
+            line_idx = line_val - 1
+            target_line_text = ""
+            if 0 <= line_idx < len(code_lines):
+                target_line_text = code_lines[line_idx].strip()
+
+            before_code = item.get("before_code", "") or ""
+
+            is_false_positive = False
+
+            if "os.getenv" in target_line_text or "os.environ" in target_line_text or "os.getenv" in before_code or "os.environ" in before_code:
+                all_text = target_line_text + " " + before_code
+                if not is_potential_secret_default(all_text):
+                    is_false_positive = True
+
+            if "BaseSettings" in target_line_text or "BaseSettings" in before_code:
+                is_false_positive = True
+
+            if "class" in target_line_text and ("Settings" in target_line_text or "Settings" in before_code):
+                is_false_positive = True
+
+            if is_false_positive:
+                continue
+
             # Normalize fields
             validated_findings.append({
                 "file": item.get("file", filename),
-                "line": int(item.get("line", 1)) if str(item.get("line")).isdigit() else 1,
+                "line": line_val,
                 "severity": item.get("severity", "Medium"),
                 "category": "Security",
                 "issue": item.get("issue", "Potential vulnerability found"),

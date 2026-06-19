@@ -1,9 +1,66 @@
-.env
+# ── Existing project-specific ignores ──
 *.pdf
 .reviewer_cache.json
 ai_code_reviewer/.reviewer_cache.json
 exports/
 ai_code_reviewer/exports/
 0.47.0
+
+# ── Environment ──
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# ── Databases ──
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Coverage ──
+.coverage
+.coverage.*
+htmlcov/
+
+# ── Generated Report Artifacts ──
+backend/storage/
+
+# ── Python ──
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Virtual Environments ──
+venv/
+.venv/
+env/
+
+# ── Node / Frontend Build ──
+node_modules/
+dist/
+build/
+.next/
+.vercel/
+
+# ── Logs ──
+*.log
+
+# ── IDE ──
+.vscode/
+.idea/
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Temporary ──
+tmp/
+temp/
+*.tmp
+
+# ── Docker Volumes (local) ──
+pgdata/
