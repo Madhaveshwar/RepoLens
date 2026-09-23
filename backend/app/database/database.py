@@ -2,7 +2,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from typing import AsyncGenerator, Generator
-from backend.app.config import settings
+from app.config import settings
 
 # Async Engine and Session for FastAPI
 async_engine = create_async_engine(

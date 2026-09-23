@@ -3,8 +3,9 @@ services:
   - type: web
     name: acr-backend
     env: python
-    buildCommand: pip install -r backend/requirements.txt
-    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -28,12 +29,13 @@ services:
       - key: GITHUB_TOKEN
         sync: false
 
-  # 2. Celery Asynchronous Worker
+  # 2. Celery Asynchronous Worker (optional — requires Redis cache service)
   - type: worker
     name: acr-worker
     env: python
-    buildCommand: pip install -r backend/requirements.txt
-    startCommand: celery -A backend.app.tasks.tasks.celery_app worker --loglevel=info
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A app.tasks.tasks.celery_app worker --loglevel=info
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -60,12 +62,12 @@ services:
       - key: GITHUB_TOKEN
         sync: false
 
-# 3. Redis Cache/Broker (Render Cache Service)
+# 3. Redis Cache/Broker (optional — required only for Celery worker + WebSocket progress)
 cache:
   name: acr-redis
   plan: free
 
-# 4. PostgreSQL Managed Database
+# 4. PostgreSQL Managed Database (required)
 databases:
   - name: acr-postgres
     plan: free

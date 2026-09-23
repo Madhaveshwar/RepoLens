@@ -2,12 +2,14 @@ import json
 import re
 from typing import Any
 from langsmith import traceable
-from backend.app.utils.prompts import SYSTEM_SECURITY_PROMPT, build_security_prompt
-from backend.app.utils.logger import get_logger
+from app.utils.prompts import SYSTEM_SECURITY_PROMPT, build_security_prompt
+from app.utils.logger import get_logger
+from app.services.static_security_scanner import StaticSecurityAnalyzer
+from app.services.llm_client import GROQ_FALLBACK_MODEL, is_model_not_found_error
 
 logger = get_logger("security_scanner")
 
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "openai/gpt-oss-120b"
 
 CONFIDENCE_THRESHOLD = 0.75
 
@@ -80,6 +82,8 @@ _FP_ISSUE_KEYWORDS = [
 _FP_CODE_PATTERNS = [
     # Config/settings classes
     (r"BaseSettings|pydantic\.BaseModel|@dataclass", ["missing auth", "hardcoded secret", "hardcoded api", "missing auth"]),
+    # Settings/SETTINGS/Config object references (e.g. DB_PATH = SETTINGS.db_path) — NOT hardcoded secrets
+    (r"\.SETTINGS\.|settings\.|SETTINGS\.|Config\.|config\.", ["hardcoded secret", "hardcoded api", "exposed credential", "credential leak", "hardcoded path", "hardcoded database"]),
     # Environment variable reads
     (r"os\.getenv|os\.environ\.get|os\.environ\[", ["hardcoded secret", "hardcoded api", "exposed credential", "credential leak"]),
     # Import statements
@@ -150,7 +154,7 @@ def scan_security(
 ) -> list[dict[str, object]]:
     logger.info(f"Triggered security scan for file: {filename} ({language})")
     prompt = build_security_prompt(filename, code, patch, language)
-    active_model = "llama-3.3-70b-versatile"
+    active_model = MODEL_NAME
     try:
         logger.info(f"Sending security analysis request with model={active_model}")
         chat_completion = client.chat.completions.create(
@@ -162,30 +166,42 @@ def scan_security(
             temperature=temperature,
         )
         result_text = chat_completion.choices[0].message.content
-        logger.info("Retrieved security scan completion from Groq API.")
+        logger.info("Retrieved security scan completion from LLM API.")
     except Exception as e:
-        logger.warning(f"Groq query failed for security scan using {active_model}: {e}")
+        logger.warning(f"LLM query failed for security scan using {active_model}: {e}")
         try:
-            logger.info("Attempting fallback security query using model=llama-3.1-8b-instant")
+            logger.info(f"Attempting fallback security query using model={GROQ_FALLBACK_MODEL}")
             chat_completion = client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": SYSTEM_SECURITY_PROMPT},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama-3.1-8b-instant",
+                model=GROQ_FALLBACK_MODEL,
                 temperature=temperature,
             )
             result_text = chat_completion.choices[0].message.content
             logger.info("Successfully retrieved fallback security scan completion.")
         except Exception as fallback_e:
             logger.error("Fallback security query failed.", exc_info=True)
-            from backend.app.services.reviewer import handle_groq_error
+            from app.services.reviewer import handle_groq_error
             raise handle_groq_error(fallback_e)
 
     findings = parse_json_from_llm(result_text)
     validated_findings = []
     code_lines = code.splitlines()
     rejected_count = 0
+
+    # ── Run Static Security Analyzer (pattern-based, deterministic) ──
+    static_findings = StaticSecurityAnalyzer.scan(
+        code=code,
+        filename=filename,
+        language=language,
+    )
+    logger.info(
+        f"Static security analyzer returned {len(static_findings)} findings "
+        f"for {filename}"
+    )
+
     for item in findings:
         if isinstance(item, dict):
             line_val = int(item.get("line", 1)) if str(item.get("line")).isdigit() else 1
@@ -239,6 +255,18 @@ def scan_security(
             })
     logger.info(
         f"Completed security scan for {filename}. "
-        f"Accepted: {len(validated_findings)}, Rejected: {rejected_count}"
+        f"LLM accepted: {len(validated_findings)}, Rejected: {rejected_count}, "
+        f"Static findings: {len(static_findings)}"
     )
-    return validated_findings
+    # Merge static findings with LLM findings (deduplicate by line + issue)
+    merged = list(validated_findings)
+    seen_issues = set()
+    for f in validated_findings:
+        seen_issues.add((f["line"], f["issue"][:80]))
+    for sf in static_findings:
+        key = (sf["line"], sf["issue"][:80])
+        if key not in seen_issues:
+            seen_issues.add(key)
+            merged.append(sf)
+            logger.info(f"Static finding added: L{sf['line']} {sf['issue'][:60]}")
+    return merged

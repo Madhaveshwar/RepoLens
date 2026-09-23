@@ -1,25 +1,33 @@
-﻿import React, { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useAuthStore } from "./store/authStore";
 import { useRepositoryStore } from "./store/repositoryStore";
+import { useAnalysisStore } from "./store/analysisStore";
 import { Sidebar } from "./components/Sidebar";
+import { ChatBot } from "./components/ChatBot";
+import { Landing } from "./pages/Landing";
 import { Login } from "./pages/Login";
 import { Register } from "./pages/Register";
+import { ForgotPassword } from "./pages/ForgotPassword";
+import { ResetPassword } from "./pages/ResetPassword";
 import { Dashboard } from "./pages/Dashboard";
 import { RepositoryDetail } from "./pages/RepositoryDetail";
 import { PRReview } from "./pages/PRReview";
-import { LocalReview } from "./pages/LocalReview";
 import { Settings } from "./pages/Settings";
-import { Loader2 } from "lucide-react";
+import { Loader2, Shield } from "lucide-react";
 
 export const App: React.FC = () => {
-  const { token, initialize, loading } = useAuthStore();
+  const { token, user, initialize, loading } = useAuthStore();
   const { activeRepo, activePr, setActiveRepo, setActivePr } = useRepositoryStore();
-  
+
   // Navigation tabs
   const [activeTab, setActiveTab] = useState("dashboard");
-  
-  // Login vs Register page toggle
-  const [authPage, setAuthPage] = useState<"login" | "register">("login");
+
+  // Whether to show the landing page or auth forms
+  const [showLanding, setShowLanding] = useState(true);
+  // Login vs Register page toggle (plus forgot/reset password pages)
+  const [authPage, setAuthPage] = useState<"login" | "register" | "forgot" | "reset">("login");
+  // Token for the password-reset page (from deep-link hash or the dev flow)
+  const [resetToken, setResetToken] = useState<string | null>(null);
 
   useEffect(() => {
     if (token) {
@@ -27,21 +35,85 @@ export const App: React.FC = () => {
     }
   }, [token]);
 
+  // Support password-reset deep links of the form
+  // http://<frontend>/#/reset-password?token=<token>
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash.startsWith("#/reset-password")) {
+      const params = new URLSearchParams(hash.split("?")[1] || "");
+      const tokenFromHash = params.get("token");
+      if (tokenFromHash) {
+        setResetToken(tokenFromHash);
+        setShowLanding(false);
+        setAuthPage("reset");
+      }
+    }
+  }, []);
+
+  // First-login onboarding: redirect to Settings if no LLM key or GitHub PAT configured
+  const hasLlmKey = user
+    ? (user.has_groq_api_key || user.has_openai_api_key ||
+       user.has_claude_api_key || user.has_gemini_api_key || user.has_openrouter_api_key)
+    : false;
+  const hasGithubPat = user?.has_github_pat || false;
+  const isSetupComplete = user ? (hasLlmKey && hasGithubPat) : false;
+
+  useEffect(() => {
+    if (user && !isSetupComplete) {
+      setActiveTab("settings");
+    }
+  }, [user?.id, isSetupComplete]);
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-background text-white">
-        <div className="flex flex-col items-center gap-3">
-          <Loader2 className="w-10 h-10 animate-spin text-accent-blue" />
-          <p className="text-sm text-muted">Initializing profile session...</p>
+      <div className="flex items-center justify-center min-h-screen bg-background">
+        <div className="flex flex-col items-center gap-6">
+          <div className="w-16 h-16 rounded-3xl bg-accent-gradient flex items-center justify-center shadow-glow-blue animate-float">
+            <Shield className="w-8 h-8 text-white" />
+          </div>
+          <Loader2 className="w-6 h-6 animate-spin text-accent-blue" />
+          <p className="text-base text-zinc-700 font-medium">Initializing your workspace...</p>
         </div>
       </div>
     );
   }
 
-  // Not authenticated
+  // Password reset page — reachable whether or not the user is signed in
+  const navigateBackToLogin = () => {
+    setResetToken(null);
+    setAuthPage("login");
+    setShowLanding(false);
+    if (window.location.hash) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  };
+  if (authPage === "reset") {
+    return <ResetPassword token={resetToken} onNavigateToLogin={navigateBackToLogin} />;
+  }
+
+  // Not authenticated — show landing page first
   if (!token) {
+    if (showLanding) {
+      return (
+        <Landing
+          onNavigateToLogin={() => { setShowLanding(false); setAuthPage("login"); }}
+          onNavigateToRegister={() => { setShowLanding(false); setAuthPage("register"); }}
+        />
+      );
+    }
+    if (authPage === "forgot") {
+      return (
+        <ForgotPassword
+          onNavigateToLogin={() => setAuthPage("login")}
+          onContinueToReset={(tok) => { setResetToken(tok); setAuthPage("reset"); }}
+        />
+      );
+    }
     return authPage === "login" ? (
-      <Login onNavigateToRegister={() => setAuthPage("register")} />
+      <Login
+        onNavigateToRegister={() => setAuthPage("register")}
+        onNavigateToForgotPassword={() => setAuthPage("forgot")}
+      />
     ) : (
       <Register onNavigateToLogin={() => setAuthPage("login")} />
     );
@@ -77,7 +149,6 @@ export const App: React.FC = () => {
           }
         }} />;
       case "repositories":
-        // Fallback to dashboard selection
         return <Dashboard onSelectRepoId={async (id) => {
           const { repositories, setActiveRepo } = useRepositoryStore.getState();
           const target = repositories.find(r => r.id === id);
@@ -85,8 +156,6 @@ export const App: React.FC = () => {
             setActiveRepo(target);
           }
         }} />;
-      case "local-review":
-        return <LocalReview />;
       case "settings":
         return <Settings />;
       default:
@@ -97,18 +166,65 @@ export const App: React.FC = () => {
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       <Sidebar activeTab={activeTab} setActiveTab={(tab) => {
-        // Reset active repo details if navigating away from repositories
         if (tab !== "repositories") {
           setActiveRepo(null);
         }
         setActiveTab(tab);
       }} />
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-background text-white">
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {renderContent()}
       </div>
+
+      {/* AI Review Assistant — ChatBot accessible from all authenticated pages */}
+      <ChatBot
+        currentPage={activeTab}
+        findingContext={(() => {
+          const { activeAnalysis, securityFindings, codeSmells } = useAnalysisStore.getState();
+          const { activeRepo } = useRepositoryStore.getState();
+          
+          if (activeTab === "repositories" && activeRepo && activeAnalysis) {
+            return {
+              type: "repository_scan",
+              repository: activeRepo.name,
+              risk_score: activeAnalysis.risk_score,
+              status: activeAnalysis.status,
+              security_findings_count: securityFindings.length,
+              code_smells_count: codeSmells.length,
+              security_findings: securityFindings.slice(0, 5).map(f => ({
+                issue: f.issue,
+                severity: f.severity,
+                file: f.file,
+                line: f.line,
+                suggestion: f.suggestion,
+              })),
+              code_smells: codeSmells.slice(0, 5).map(s => ({
+                issue: s.issue,
+                severity: s.severity,
+                file: s.file,
+                line: s.line,
+              })),
+            };
+          }
+          
+          if (activeTab === "dashboard") {
+            return {
+              type: "dashboard",
+              active_repository: activeRepo?.name || null,
+            };
+          }
+
+          if (activeTab === "settings") {
+            return {
+              type: "settings",
+              message: "The user is configuring API keys for LLM providers (Groq, OpenAI, Claude, Gemini, OpenRouter) and GitHub PAT. The user can test connections, set defaults, and manage encryption.",
+            };
+          }
+          
+          return undefined;
+        })()}
+      />
     </div>
   );
 };
 
 export default App;
-

@@ -31,8 +31,7 @@ class UserOut(BaseModel):
     llm_temperature: Optional[float] = None
     llm_max_tokens: Optional[int] = None
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 class CredentialsUpdate(BaseModel):
     github_pat: Optional[str] = None
@@ -74,6 +73,14 @@ class GitPushRequest(BaseModel):
     commit_message: str
     branch: str = "main"
 
+class GitAutomationRequest(BaseModel):
+    file_path: str
+    file_content: str
+    branch_name: str
+    commit_message: str = "AI-guided code remediation"
+    pr_title: str = "[AI] Automated code fixes"
+    pr_description: str = "This PR applies AI-detected code improvements, security patches, and maintainability fixes."
+
 # API Key Schemas
 class ApiKeyCreate(BaseModel):
     name: str
@@ -85,8 +92,7 @@ class ApiKeyOut(BaseModel):
     is_active: bool
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 class ApiKeyGenerated(ApiKeyOut):
     plain_key: str
@@ -111,8 +117,7 @@ class RepositoryOut(BaseModel):
     permissions: Optional[Dict[str, bool]] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 # PR Schemas
 class PullRequestOut(BaseModel):
@@ -127,8 +132,7 @@ class PullRequestOut(BaseModel):
     base_sha: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 # Analysis & Finding Schemas
 class AnalysisTrigger(BaseModel):
@@ -142,6 +146,7 @@ class AnalysisOut(BaseModel):
     status: str
     progress: int
     risk_score: int
+    health_score: Optional[int] = None
     latency_seconds: int
     estimated_token_usage: int
     files_analyzed_count: int
@@ -156,8 +161,7 @@ class AnalysisOut(BaseModel):
     insights: Optional[str] = None
     timestamp: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 class SecurityFindingOut(BaseModel):
     id: UUID
@@ -175,9 +179,9 @@ class SecurityFindingOut(BaseModel):
     end_line: Optional[int] = None
     code_snippet: Optional[str] = None
     issue_explanation: Optional[str] = None
+    confidence_score: Optional[int] = None
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 class CodeSmellOut(BaseModel):
     id: UUID
@@ -195,9 +199,9 @@ class CodeSmellOut(BaseModel):
     end_line: Optional[int] = None
     code_snippet: Optional[str] = None
     issue_explanation: Optional[str] = None
+    confidence_score: Optional[int] = None
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 class TestSuggestionOut(BaseModel):
     id: UUID
@@ -205,8 +209,7 @@ class TestSuggestionOut(BaseModel):
     file: str
     content: str
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 class HealthScoreOut(BaseModel):
     id: UUID
@@ -221,8 +224,7 @@ class HealthScoreOut(BaseModel):
     source_files_count: int
     docstring_coverage: int
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 # Report Schemas
 class ReportOut(BaseModel):
@@ -231,8 +233,7 @@ class ReportOut(BaseModel):
     type: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 # Combined Dashboard Metrics Schema
 class DashboardMetrics(BaseModel):
@@ -251,24 +252,32 @@ class DashboardMetrics(BaseModel):
     token_consumption: Dict[str, int]
     model_usage: Dict[str, int]
 
-# Local Snippet review
-class SnippetReviewRequest(BaseModel):
-    code: str
-    language: str
 
-class SnippetReviewOut(BaseModel):
-    risk_score: int
-    findings: List[Dict[str, Any]]
-    test_suggestions: str
-    severity_counts: Dict[str, int]
-    latency_seconds: float
-    scores: Dict[str, int]
-    is_valid_code: bool
-    detected_language: Optional[str] = None
-    optimization_required: Optional[bool] = None
-    optimized_code: Optional[str] = None
-    quality_score: Optional[int] = None
-    validation_message: Optional[str] = None
+class FixFindingRequest(BaseModel):
+    finding_id: str
+    finding_type: str  # "security" | "code_smell" | "test"
+    file_path: str
+    file_content: str
+    issue: str
+    severity: str = "Medium"
+    suggestion: Optional[str] = None
+    before_code: Optional[str] = None
+    after_code: Optional[str] = None
+
+class FixFindingResponse(BaseModel):
+    fix_type: str
+    original_code_snippet: str
+    fixed_code_snippet: str
+    fixed_full_file: Optional[str] = None
+    explanation: str
+    start_line: int = 1
+    end_line: int = 1
+    latency_seconds: float = 0.0
+
+
+# [REMOVED] FixAllRequest, FixAllFindingItem, FixAllResponse, FixAllAndPrRequest, FixAllAndPrResponse
+# These schemas were removed because this project does not modify repositories.
+
 
 class AuditLogOut(BaseModel):
     id: UUID
@@ -278,8 +287,39 @@ class AuditLogOut(BaseModel):
     ip_address: Optional[str] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
+
+class ValidateFixCodeRequest(BaseModel):
+    code: str
+    file_path: str
+
+class ValidateFixCodeResponse(BaseModel):
+    syntax_ok: bool = True
+    syntax_error: str = ""
+    imports_ok: bool = True
+    imports_error: str = ""
+    overall_valid: bool = True
+
+
+
+class RescanVerifyRequest(BaseModel):
+    original_analysis_id: UUID
+    rescan_analysis_id: UUID
+    mark_resolved: bool = True
+
+class RescanVerifyResponse(BaseModel):
+    original_analysis_id: str
+    rescan_analysis_id: str
+    status: str  # "improved" | "regressed" | "no_change"
+    fixed_findings: List[Dict[str, Any]]
+    remaining_findings: List[Dict[str, Any]]
+    new_findings: List[Dict[str, Any]]
+    risk_score_before: int
+    risk_score_after: int
+    resolved_count: int
+    unresolved_count: int
+
+# [REMOVED] ApplyFixRequest, ApplyFixResponse — this project does not modify repositories
 
 class DeadLetterTaskOut(BaseModel):
     id: UUID
@@ -292,6 +332,24 @@ class DeadLetterTaskOut(BaseModel):
     resolved: bool
     resolved_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
+
+
+# Password Reset Schemas
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+    # Only populated in NON-PRODUCTION environments when email sending is not
+    # configured, so local development can complete the reset flow without SMTP.
+    dev_reset_url: Optional[str] = None
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+    confirm_password: str
+
+class ResetPasswordResponse(BaseModel):
+    message: str
 

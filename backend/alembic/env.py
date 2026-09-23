@@ -16,8 +16,8 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-from backend.app.database.database import Base
-from backend.app.models.models import (
+from app.database.database import Base
+from app.models.models import (
     User, ApiKey, Repository, PullRequest, Analysis,
     SecurityFinding, CodeSmell, TestSuggestion, HealthScore,
     Report
@@ -25,7 +25,7 @@ from backend.app.models.models import (
 target_metadata = Base.metadata
 
 # Dynamically set database URL from application config
-from backend.app.config import settings
+from app.config import settings
 db_url = settings.SYNC_DATABASE_URL
 if db_url.startswith("postgresql+asyncpg://"):
     db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")

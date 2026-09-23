@@ -1,487 +1,526 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import axios from "../lib/api";
 import { useAuthStore } from "../store/authStore";
-import { useQuery } from "@tanstack/react-query";
-import { Key, Github, HelpCircle, CheckCircle2, AlertTriangle, Loader2, RefreshCw, Eye, EyeOff, Brain } from "lucide-react";
+import {
+  Key, Github, CheckCircle2, AlertTriangle, Loader2,
+  Eye, EyeOff, Brain, Shield, Rocket, X, Trash2, Sparkles, Cpu, Zap, Globe
+} from "lucide-react";
 
-interface ProvidersDiagnostics {
-  providers: Record<string, { configured: boolean; status: string; api_status?: string }>;
-  encryption_status: string;
-  database_status: string;
-  redis_status: string;
-  jwt_status: string;
+// ── Types ──
+
+interface ProviderStatus {
+  configured: boolean;
+  status: string;        // "Configured" | "Invalid" | "Missing"
+  api_status: string;    // "Connected" | "Invalid Key" | "Missing Key" | ...
+  last_tested?: string;
 }
 
-const PROVIDER_INFO: Record<string, { label: string; icon: React.ReactNode; placeholder: string; docsUrl: string }> = {
-  github: {
-    label: "GitHub Personal Access Token (PAT)",
+interface ProvidersDiagnostics {
+  providers: Record<string, ProviderStatus>;
+  encryption_status?: string;
+  database_status?: string;
+  jwt_status?: string;
+}
+
+type ToastType = "success" | "error";
+
+interface Toast {
+  id: number;
+  type: ToastType;
+  message: string;
+}
+
+let toastIdCounter = 0;
+
+// ── Constants ──
+
+const PROVIDERS = [
+  {
+    key: "github",
+    label: "GitHub Token",
     icon: <Github className="w-4 h-4" />,
     placeholder: "ghp_xxxxxxxxxxxxxxxxxxxx",
-    docsUrl: "https://github.com/settings/tokens"
+    docsUrl: "https://github.com/settings/tokens",
+    fieldName: "github_pat",
+    optional: true,
+    category: "integration"
   },
-  groq: {
+  {
+    key: "groq",
     label: "Groq API Key",
-    icon: <Brain className="w-4 h-4" />,
+    icon: <Zap className="w-4 h-4" />,
     placeholder: "gsk_xxxxxxxxxxxxxxxxxxxx",
-    docsUrl: "https://console.groq.com/keys"
+    docsUrl: "https://console.groq.com/keys",
+    fieldName: "groq_api_key",
+    optional: false,
+    category: "llm"
   },
-  openai: {
+  {
+    key: "openai",
     label: "OpenAI API Key",
-    icon: <Key className="w-4 h-4" />,
+    icon: <Brain className="w-4 h-4" />,
     placeholder: "sk-xxxxxxxxxxxxxxxxxxxx",
-    docsUrl: "https://platform.openai.com/api-keys"
+    docsUrl: "https://platform.openai.com/api-keys",
+    fieldName: "openai_api_key",
+    optional: false,
+    category: "llm"
   },
-  claude: {
-    label: "Anthropic Claude API Key",
-    icon: <Key className="w-4 h-4" />,
+  {
+    key: "claude",
+    label: "Claude API Key",
+    icon: <Sparkles className="w-4 h-4" />,
     placeholder: "sk-ant-xxxxxxxxxxxxxxxxxxxx",
-    docsUrl: "https://console.anthropic.com/settings/keys"
+    docsUrl: "https://console.anthropic.com/settings/keys",
+    fieldName: "claude_api_key",
+    optional: false,
+    category: "llm"
   },
-  gemini: {
-    label: "Google Gemini API Key",
-    icon: <Key className="w-4 h-4" />,
-    placeholder: "AIzaxxxxxxxxxxxxxxxxxxxx",
-    docsUrl: "https://aistudio.google.com/apikey"
+  {
+    key: "gemini",
+    label: "Gemini API Key",
+    icon: <Cpu className="w-4 h-4" />,
+    placeholder: "AIzaxxxxxxxxxxxxxxxxxxxxxxxx",
+    docsUrl: "https://aistudio.google.com/app/apikey",
+    fieldName: "gemini_api_key",
+    optional: false,
+    category: "llm"
   },
-  openrouter: {
+  {
+    key: "openrouter",
     label: "OpenRouter API Key",
-    icon: <Key className="w-4 h-4" />,
-    placeholder: "sk-or-v1-xxxxxxxxxxxxxxxxxxxx",
-    docsUrl: "https://openrouter.ai/keys"
+    icon: <Globe className="w-4 h-4" />,
+    placeholder: "sk-or-xxxxxxxxxxxxxxxxxxxx",
+    docsUrl: "https://openrouter.ai/keys",
+    fieldName: "openrouter_api_key",
+    optional: false,
+    category: "llm"
   }
-};
+];
 
-const MODELS_BY_PROVIDER: Record<string, string[]> = {
-  groq: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"],
-  openai: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
-  claude: ["claude-sonnet-4-20250514", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
-  gemini: ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
-  openrouter: ["openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini-2.0-flash", "meta-llama/llama-3.3-70b"]
-};
+const LLM_PROVIDERS = PROVIDERS.filter(p => p.category === "llm");
 
-// Helper component for displaying system status
-const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
-  const isHealthy = status === "Connected" || status === "Active" || status === "Active (AES-256)" || status === "Configured";
-  const isError = status?.toLowerCase().includes("error") || status?.toLowerCase().includes("inactive");
-  return (
-    <span className={`text-xs font-semibold ${isHealthy ? "text-accent-green" : isError ? "text-red-400" : "text-zinc-500"}`}>
-      {status}
-    </span>
-  );
-};
+const EMPTY_FORM_KEYS: Record<string, string> = Object.fromEntries(
+  PROVIDERS.map(p => [p.key, ""])
+);
+
+// ── Toast ──
+
+const ToastContainer: React.FC<{ toasts: Toast[]; onDismiss: (id: number) => void }> = ({ toasts, onDismiss }) => (
+  <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-2 max-w-sm">
+    <AnimatePresence>
+      {toasts.map((t) => (
+        <motion.div
+          key={t.id}
+          initial={{ opacity: 0, y: 20, scale: 0.95 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -10, scale: 0.95 }}
+          transition={{ duration: 0.25, ease: "easeOut" }}
+          className={`flex items-start gap-3 px-5 py-4 rounded-2xl shadow-lg border backdrop-blur-sm ${
+            t.type === "success"
+              ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+              : "bg-red-50 border-red-200 text-red-800"
+          }`}
+        >
+          {t.type === "success"
+            ? <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5" />
+            : <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+          }
+          <p className="text-sm font-medium flex-1">{t.message}</p>
+          <button onClick={() => onDismiss(t.id)} className="shrink-0 bg-transparent border-0 cursor-pointer p-0.5 hover:opacity-70 transition-opacity">
+            <X className="w-4 h-4" />
+          </button>
+        </motion.div>
+      ))}
+    </AnimatePresence>
+  </div>
+);
+
+// ── Settings ──
 
 export const Settings: React.FC = () => {
   const { user, initialize } = useAuthStore();
-  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
 
-  // Form state for each provider
-  const [formKeys, setFormKeys] = useState<Record<string, string>>({
-    github: "", groq: "", openai: "", claude: "", gemini: "", openrouter: ""
-  });
-  const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
-  const [defaultProvider, setDefaultProvider] = useState(user?.llm_default_provider || "groq");
-  const [defaultModel, setDefaultModel] = useState(user?.llm_default_model || "");
-  const [temperature, setTemperature] = useState(user?.llm_temperature ?? 0.3);
-  const [maxTokens, setMaxTokens] = useState(user?.llm_max_tokens ?? 4096);
-  const [updating, setUpdating] = useState(false);
-  const [testConnectionLoading, setTestConnectionLoading] = useState<string | null>(null);
-  const [connectionTestResults, setConnectionTestResults] = useState<Record<string, string>>({});
+  const addToast = useCallback((type: ToastType, message: string) => {
+    const id = ++toastIdCounter;
+    setToasts((prev) => [...prev, { id, type, message }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 5000);
+  }, []);
 
-  // Diagnostics
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // ── Diagnostics ──
   const [diagnostics, setDiagnostics] = useState<ProvidersDiagnostics | null>(null);
+  const [loadingDiag, setLoadingDiag] = useState(false);
 
-  const { data: diagnosticsData, isLoading: loadingDiag, refetch: refetchDiag } = useQuery({
-    queryKey: ["diagnostics", user?.id],
-    queryFn: async () => {
-      const response = await axios.get("/users/me/diagnostics");
-      return response.data as ProvidersDiagnostics;
-    },
-    enabled: !!user,
-    staleTime: 30000,
-    gcTime: 5 * 60 * 1000,
-  });
-
-  useEffect(() => {
-    if (diagnosticsData) setDiagnostics(diagnosticsData);
-  }, [diagnosticsData]);
-
-  useEffect(() => {
-    if (user?.llm_default_provider) setDefaultProvider(user.llm_default_provider);
-    if (user?.llm_default_model) setDefaultModel(user.llm_default_model);
-    if (user?.llm_temperature != null) setTemperature(user.llm_temperature);
-    if (user?.llm_max_tokens != null) setMaxTokens(user.llm_max_tokens);
+  const fetchDiagnostics = useCallback(async () => {
+    if (!user) return;
+    setLoadingDiag(true);
+    try {
+      const res = await axios.get("/users/me/diagnostics");
+      setDiagnostics(res.data as ProvidersDiagnostics);
+    } catch {
+      // silently fail
+    } finally {
+      setLoadingDiag(false);
+    }
   }, [user]);
 
-  const toggleKeyVisibility = (provider: string) => {
-    setShowKeys((prev) => ({ ...prev, [provider]: !prev[provider] }));
+  useEffect(() => {
+    fetchDiagnostics();
+  }, [fetchDiagnostics]);
+
+  // ── Form state ──
+  const [formKeys, setFormKeys] = useState<Record<string, string>>({ ...EMPTY_FORM_KEYS });
+  const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [deletingProvider, setDeletingProvider] = useState<string | null>(null);
+
+  // ── Default provider & model selection ──
+  const [defaultProvider, setDefaultProvider] = useState<string>(user?.llm_default_provider || "groq");
+  const [defaultModel, setDefaultModel] = useState<string>(user?.llm_default_model || "");
+
+  const MODEL_OPTIONS: Record<string, string[]> = {
+    groq: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+    openai: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
+    claude: ["claude-3-haiku-20240307", "claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"],
+    gemini: ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"],
+    openrouter: ["meta-llama/llama-3.3-70b-instruct:free", "openai/gpt-oss-20b:free", "deepseek/deepseek-chat-v3-0324:free"],
   };
 
-  const handleKeyChange = (provider: string, value: string) => {
-    setFormKeys((prev) => ({ ...prev, [provider]: value }));
-  };
-
-  const handleTestConnection = async (provider: string) => {
-    setTestConnectionLoading(provider);
-    setConnectionTestResults((prev) => ({ ...prev, [provider]: "Testing..." }));
-    try {
-      if (provider === "github") {
-        const res = await axios.get("/users/me/diagnostics");
-        const apiStatus = res.data?.providers?.github?.api_status || "Unknown";
-        setConnectionTestResults((prev) => ({ ...prev, [provider]: apiStatus === "Online" ? "Connected" : apiStatus }));
-      } else {
-        // For LLM providers, we just check if the key is configured
-        const res = await axios.get("/users/me/diagnostics");
-        const configured = res.data?.providers?.[provider]?.configured;
-        setConnectionTestResults((prev) => ({ ...prev, [provider]: configured ? "Configured" : "Not Configured" }));
-      }
-    } catch (err: any) {
-      setConnectionTestResults((prev) => ({ ...prev, [provider]: `Error: ${err.message}` }));
-    } finally {
-      setTestConnectionLoading(null);
+  useEffect(() => {
+    if (user?.llm_default_provider) {
+      setDefaultProvider(user.llm_default_provider);
     }
-  };
+    if (user?.llm_default_model) {
+      setDefaultModel(user.llm_default_model);
+    }
+  }, [user?.llm_default_provider, user?.llm_default_model]);
 
-  const hasAnyKeysToUpdate = () => {
-    return Object.values(formKeys).some((v) => v.trim().length > 0) || 
-           defaultProvider !== (user?.llm_default_provider || "groq") || 
-           defaultModel !== (user?.llm_default_model || "") ||
-           temperature !== (user?.llm_temperature ?? 0.3) ||
-           maxTokens !== (user?.llm_max_tokens ?? 4096);
+  const getProviderStatus = (providerKey: string): { status: string; api_status: string; last_tested?: string } => {
+    const d = diagnostics?.providers?.[providerKey];
+    if (!d) {
+      // Check user profile as fallback
+      const fieldKey = providerKey === "github" ? "has_github_pat" : `has_${providerKey}_api_key`;
+      const configured = user ? (user as any)[fieldKey] : false;
+      return { status: configured ? "Configured" : "Missing", api_status: configured ? "Configured" : "Missing Key" };
+    }
+    return { status: d.status, api_status: d.api_status, last_tested: d.last_tested };
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setUpdating(true);
-    setMessage(null);
-
+    setSaving(true);
     try {
       const payload: Record<string, any> = {};
-      for (const [provider, value] of Object.entries(formKeys)) {
+      for (const provider of PROVIDERS) {
+        const value = formKeys[provider.key];
         if (value.trim()) {
-          payload[provider === "github" ? "github_pat" : `${provider}_api_key`] = value.trim();
+          payload[provider.fieldName] = value.trim();
         }
       }
-      payload.llm_default_provider = defaultProvider;
-      payload.llm_default_model = defaultModel || null;
-      payload.llm_temperature = temperature;
-      payload.llm_max_tokens = maxTokens;
+
+      // Always include default provider + model selection
+      if (defaultProvider) {
+        payload["llm_default_provider"] = defaultProvider;
+      }
+      if (defaultModel) {
+        payload["llm_default_model"] = defaultModel;
+      }
+
+      if (Object.keys(payload).length === 0) {
+        addToast("error", "Enter at least one credential to save.");
+        setSaving(false);
+        return;
+      }
 
       await axios.post("/users/keys", payload);
-      setMessage({ type: "success", text: "Credentials saved and encrypted successfully!" });
-      // Clear form
-      setFormKeys({ github: "", groq: "", openai: "", claude: "", gemini: "", openrouter: "" });
+      addToast("success", "Credentials saved successfully");
+      setFormKeys({ ...EMPTY_FORM_KEYS });
       await initialize();
-      refetchDiag();
+      await fetchDiagnostics();
     } catch (err: any) {
-      setMessage({ type: "error", text: err.response?.data?.detail || "Failed to update credentials." });
+      const detail = err.response?.data?.detail || "Failed to save credentials.";
+      // Extract first line for a concise toast
+      const firstLine = detail.split("\n")[0].trim();
+      addToast("error", firstLine);
     } finally {
-      setUpdating(false);
+      setSaving(false);
     }
   };
 
-  const toggleProvider = (provider: string) => {
-    if (defaultProvider === provider) return;
-    setDefaultProvider(provider);
-    // Auto-select first model for this provider
-    const models = MODELS_BY_PROVIDER[provider] || [];
-    setDefaultModel(models[0] || "");
+  const handleDeleteCredential = async (providerKey: string) => {
+    setDeletingProvider(providerKey);
+    try {
+      await axios.delete(`/users/keys/${providerKey}`);
+      addToast("success", `${providerKey.charAt(0).toUpperCase() + providerKey.slice(1)} credential deleted`);
+      await initialize();
+      await fetchDiagnostics();
+    } catch (err: any) {
+      const detail = err.response?.data?.detail || "Failed to delete credential.";
+      addToast("error", detail);
+    } finally {
+      setDeletingProvider(null);
+    }
+  };
+
+  const toggleShowKey = (provider: string) => {
+    setShowKeys((prev) => ({ ...prev, [provider]: !prev[provider] }));
+  };
+
+  const hasLlmKey = user ? (
+    user.has_groq_api_key || user.has_openai_api_key ||
+    user.has_claude_api_key || user.has_gemini_api_key || user.has_openrouter_api_key
+  ) : false;
+
+  const isProviderConfigured = (providerKey: string): boolean => {
+    const s = getProviderStatus(providerKey);
+    return s.status !== "Missing";
   };
 
   return (
-    <div className="flex-1 p-8 overflow-y-auto max-h-screen font-sans">
-      <div className="max-w-4xl">
-        <h1 className="text-3xl font-extrabold tracking-tight mb-2">Settings</h1>
-        <p className="text-muted mb-6">Manage your LLM provider API keys, default model preferences, and integration diagnostics.</p>
+    <div className="flex-1 p-8 overflow-y-auto max-h-screen">
+      <div className="max-w-2xl mx-auto">
+        <div className="mb-8">
+          <h1 className="text-4xl font-bold text-zinc-900">Settings</h1>
+          <p className="text-base text-zinc-700 font-medium mt-1">Configure your API credentials and default LLM provider</p>
+        </div>
 
-        {message && (
-          <div className={`mb-6 p-4 rounded-lg text-sm flex items-start gap-3 border ${
-            message.type === "success"
-              ? "bg-green-500/10 border-green-500/20 text-green-400"
-              : "bg-red-500/10 border-red-500/20 text-red-400"
-          }`}>
-            {message.type === "success" ? (
-              <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5" />
-            ) : (
-              <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
-            )}
-            <div>
-              <p className="font-semibold">{message.type === "success" ? "Success" : "Error"}</p>
-              <p className="mt-1 text-xs">{message.text}</p>
+        {/* Onboarding */}
+        {!hasLlmKey && user && (
+          <motion.div
+            className="mb-8 bg-gradient-to-br from-violet-50 to-blue-50 border border-violet-200/60 rounded-3xl p-8 shadow-sm relative overflow-hidden"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+          >
+            <div className="absolute top-0 right-0 w-64 h-64 bg-gradient-to-bl from-violet-200/20 to-transparent rounded-full -mr-20 -mt-20 pointer-events-none" />
+            <div className="relative z-10">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="w-12 h-12 rounded-2xl bg-accent-gradient flex items-center justify-center shadow-glow-blue">
+                  <Rocket className="w-6 h-6 text-zinc-900" />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold text-zinc-900">Welcome to RepoLens AI</h2>
+                  <p className="text-base text-zinc-700 mt-0.5">Configure an AI provider to get started</p>
+                </div>
+              </div>
+              <div className="mt-4 bg-white/50 backdrop-blur-sm border border-violet-200/30 rounded-2xl p-4 flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />                  <p className="text-xs text-zinc-800 font-medium leading-relaxed">
+                  Add at least one LLM API key below (<strong>Groq</strong>, <strong>OpenAI</strong>, <strong>Claude</strong>, <strong>Gemini</strong>, or <strong>OpenRouter</strong>) to run code reviews and scan repositories.
+                  Your key is encrypted with AES-256 before storage.
+                </p>
+              </div>
             </div>
-          </div>
+          </motion.div>
         )}
 
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-          {/* Left Column: API Keys Form */}
-          <div className="xl:col-span-2 space-y-8">
-            {/* API Credentials */}
-            <div className="bg-surface border border-border rounded-xl p-6 shadow-xl">
-              <div className="flex items-center gap-3 mb-6 border-b border-border pb-4">
-                <Key className="w-5 h-5 text-accent-blue" />
-                <div>
-                  <h3 className="font-bold text-white">Multi-Provider LLM Credentials</h3>
-                  <p className="text-xs text-muted">All API keys are encrypted via AES-256 before storage. You can configure multiple providers and select your default.</p>
-                </div>
-              </div>
+        {/* Credential Status Summary */}
+        <div className="glass-card p-6 mb-8">
+          <div className="flex items-center gap-3 mb-5 border-b border-border/40 pb-4">
+            <div className="w-10 h-10 rounded-2xl bg-emerald-50 flex items-center justify-center">
+              <Shield className="w-5 h-5 text-emerald-600" />
+            </div>
+            <div>
+              <h3 className="font-bold font-sans text-zinc-950">Credential Status</h3>
+              <p className="text-xs text-zinc-700 font-medium">Real-time validation against provider APIs</p>
+            </div>
+          </div>
 
-              <form onSubmit={handleSubmit} className="space-y-5">
-                {Object.entries(PROVIDER_INFO).map(([provider, info]) => {
-                  const fieldKey = provider === "github" ? "has_github_pat" : "has_" + provider + "_api_key";
-                  const configured = user ? (user as any)[fieldKey] : false;
+          {loadingDiag ? (
+            <div className="flex justify-center py-6">
+              <Loader2 className="w-5 h-5 animate-spin text-accent-blue" />
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {PROVIDERS.map((provider) => {
+                const s = getProviderStatus(provider.key);
+                const isConnected = s.status === "Configured" && s.api_status === "Connected";
+                const isInvalid = s.status === "Invalid";
+                const isConfigured = s.status !== "Missing";
 
-                  return (
-                    <div key={provider}>
-                      <div className="flex justify-between items-center mb-2">
-                        <label className="block text-xs font-semibold text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
-                          {info.icon}
-                          {info.label}
-                        </label>
-                        <div className="flex items-center gap-2">
-                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
-                            configured ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-zinc-800 text-zinc-500"
-                          }`}>
-                            {configured ? "Configured" : "Not Configured"}
-                          </span>
-                          <span title={`Get your key at ${info.docsUrl}`}>
-                            <a href={info.docsUrl} target="_blank" rel="noopener noreferrer" className="text-accent-blue hover:text-blue-400">
-                              <HelpCircle className="w-3.5 h-3.5" />
-                            </a>
-                          </span>
-                        </div>
+                return (
+                  <div key={provider.key} className="flex items-center justify-between py-2.5 border-b border-border/20 last:border-0">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-xl bg-zinc-50 flex items-center justify-center">
+                        {provider.icon}
                       </div>
-                      <div className="flex gap-2">
-                      <div className="relative flex-1">
-                        <input
-                          type={showKeys[provider] ? "text" : "password"}
-                          placeholder={configured ? "•••••••••••••••••• (Leave blank to keep current)" : info.placeholder}
-                          value={formKeys[provider]}
-                          onChange={(e) => handleKeyChange(provider, e.target.value)}
-                          className="w-full px-3 py-2.5 pr-10 bg-background border border-border rounded-lg text-white placeholder-zinc-500 focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue text-sm"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => toggleKeyVisibility(provider)}
-                          className="absolute inset-y-0 right-0 pr-3 flex items-center text-zinc-500 hover:text-white bg-transparent border-0 cursor-pointer"
-                        >
-                          {showKeys[provider] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleTestConnection(provider)}
-                        disabled={testConnectionLoading === provider}
-                        className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 border border-border text-zinc-300 hover:text-white text-[10px] font-semibold rounded-lg transition-colors flex items-center gap-1.5 shrink-0"
-                      >
-                        {testConnectionLoading === provider ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <RefreshCw className="w-3 h-3" />
+                      <div>
+                        <span className="text-sm font-semibold text-zinc-900">{provider.label}</span>
+                        {provider.category === "llm" && (
+                          <span className="ml-2 text-[10px] text-zinc-400 font-medium">LLM</span>
                         )}
-                        Test
-                      </button>
+                        {provider.key === "github" && (
+                          <span className="ml-2 text-[10px] text-zinc-400 font-medium">Integration</span>
+                        )}
                       </div>
-                      {connectionTestResults[provider] && (
-                        <p className={`mt-1 text-[10px] font-medium ${
-                          connectionTestResults[provider] === "Connected" || connectionTestResults[provider] === "Configured"
-                            ? "text-accent-green" : "text-red-400"
-                        }`}>
-                          {connectionTestResults[provider]}
-                        </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {isConnected ? (
+                        <span className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                          Connected
+                        </span>
+                      ) : isInvalid ? (
+                        <span className="flex items-center gap-1.5 text-xs font-semibold text-red-700">
+                          <span className="w-2 h-2 rounded-full bg-red-500" />
+                          Invalid
+                        </span>
+                      ) : s.status === "Missing" ? (
+                        <span className="text-xs text-zinc-600 font-semibold">Not configured</span>
+                      ) : (
+                        <span className="text-xs text-zinc-600 font-semibold">Not configured</span>
+                      )}
+                      {isConfigured && (
+                        <button
+                          onClick={() => handleDeleteCredential(provider.key)}
+                          disabled={deletingProvider === provider.key}
+                          className="ml-1 p-1.5 rounded-lg text-zinc-400 hover:text-red-500 hover:bg-red-50 transition-all bg-transparent border-0 cursor-pointer disabled:opacity-50"
+                          title={`Delete ${provider.label}`}
+                        >
+                          {deletingProvider === provider.key ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                        </button>
                       )}
                     </div>
-                  );
-                })}
-
-                {/* Default Provider & Model */}
-                <div className="border-t border-border pt-5 mt-5">
-                  <h4 className="text-xs font-bold text-white uppercase tracking-wider mb-4">Default LLM Configuration</h4>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Provider Selector */}
-                    <div>
-                      <label className="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">Default Provider</label>
-                      <div className="flex flex-wrap gap-2">
-                        {Object.keys(MODELS_BY_PROVIDER).map((provider) => (
-                          <button
-                            key={provider}
-                            type="button"
-                            onClick={() => toggleProvider(provider)}
-                            className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
-                              defaultProvider === provider
-                                ? "bg-accent-blue/15 border-accent-blue text-accent-blue"
-                                : "bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white hover:border-zinc-500"
-                            }`}
-                          >
-                            {provider.charAt(0).toUpperCase() + provider.slice(1)}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Model Selector */}
-                    <div>
-                      <label className="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">Default Model</label>
-                      <select
-                        value={defaultModel}
-                        onChange={(e) => setDefaultModel(e.target.value)}
-                        className="w-full bg-zinc-900 border border-border rounded-lg text-white text-xs px-3 py-2.5 focus:outline-none focus:border-accent-blue"
-                      >
-                        <option value="">-- Select Model --</option>
-                        {(MODELS_BY_PROVIDER[defaultProvider] || []).map((model) => (
-                          <option key={model} value={model}>{model}</option>
-                        ))}
-                      </select>
-                    </div>
                   </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
-                  {/* Temperature & Max Tokens */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                    <div>
-                      <label className="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-                        Temperature <span className="text-zinc-600 font-normal normal-case">(0.0 - 2.0)</span>
-                      </label>
-                      <div className="flex items-center gap-3">
-                        <input
-                          type="range"
-                          min="0"
-                          max="200"
-                          value={Math.round(temperature * 100)}
-                          onChange={(e) => setTemperature(parseFloat((parseInt(e.target.value) / 100).toFixed(2)))}
-                          step="5"
-                          className="flex-1 h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-accent-blue"
-                        />
-                        <input
-                          type="number"
-                          min={0}
-                          max={2}
-                          step={0.05}
-                          value={temperature}
-                          onChange={(e) => setTemperature(parseFloat(e.target.value) || 0)}
-                          className="w-16 bg-zinc-900 border border-border rounded-lg text-white text-xs px-2 py-1.5 text-center focus:outline-none focus:border-accent-blue"
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-                        Max Tokens <span className="text-zinc-600 font-normal normal-case">(per response)</span>
-                      </label>
-                      <input
-                        type="number"
-                        min={256}
-                        max={128000}
-                        step={256}
-                        value={maxTokens}
-                        onChange={(e) => setMaxTokens(parseInt(e.target.value) || 4096)}
-                        className="w-full bg-zinc-900 border border-border rounded-lg text-white text-xs px-3 py-2 focus:outline-none focus:border-accent-blue"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={updating || !hasAnyKeysToUpdate()}
-                  className="w-full py-2.5 bg-accent-blue hover:bg-blue-600 disabled:opacity-50 text-white font-semibold text-sm rounded-lg flex items-center justify-center gap-2 transition-all duration-150 mt-2"
-                >
-                  {updating ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Encrypting and saving...
-                    </>
-                  ) : (
-                    "Save Credentials"
-                  )}
-                </button>
-              </form>
+        {/* Default LLM Provider Selection */}
+        <div className="glass-card p-6 mb-8">
+          <div className="flex items-center gap-3 mb-5 border-b border-border/40 pb-4">
+            <div className="w-10 h-10 rounded-2xl bg-violet-50 flex items-center justify-center">
+              <Sparkles className="w-5 h-5 text-violet-600" />
+            </div>
+            <div>
+              <h3 className="font-bold text-zinc-950">Default LLM Provider</h3>
+              <p className="text-xs text-zinc-700 font-medium">Choose which AI provider powers scans & chat</p>
             </div>
           </div>
-
-          {/* Right Column: Diagnostics */}
-          <div className="space-y-6">
-            {/* Diagnostics Card */}
-            <div className="bg-surface border border-border rounded-xl p-6">
-              <div className="flex justify-between items-center mb-2">
-                <h3 className="font-bold text-white text-sm">Integration Diagnostics</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {LLM_PROVIDERS.map((provider) => {
+              const isSelected = defaultProvider === provider.key;
+              const configured = isProviderConfigured(provider.key);
+              return (
                 <button
-                  onClick={() => refetchDiag()}
-                  disabled={loadingDiag}
-                  className="text-xs text-accent-blue hover:text-blue-400 flex items-center gap-1.5 disabled:opacity-50 bg-transparent border-0 cursor-pointer"
+                  key={provider.key}
                   type="button"
+                  onClick={() => setDefaultProvider(provider.key)}
+                  className={`flex items-center gap-2 px-4 py-3 rounded-2xl border transition-all cursor-pointer ${
+                    isSelected
+                      ? "border-accent-blue bg-blue-50/80 text-accent-blue ring-1 ring-accent-blue/20 shadow-sm"
+                      : "border-border/40 bg-white hover:border-zinc-300 text-zinc-700"
+                  }`}
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${loadingDiag ? "animate-spin" : ""}`} />
-                  Refresh
-                </button>
-              </div>
-              <p className="text-xs text-muted mb-4">Shows which providers have valid API keys configured in your account.</p>                  {loadingDiag ? (
-                <div className="flex justify-center py-8">
-                  <Loader2 className="w-6 h-6 animate-spin text-accent-blue" />
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {diagnostics?.providers && Object.entries(diagnostics.providers).map(([provider, status]) => (
-                    <div key={provider} className="flex justify-between items-center text-xs border-b border-border/40 pb-2.5 last:border-0 last:pb-0">
-                      <span className="text-zinc-400 font-medium capitalize">{provider}</span>
-                      <span className={status.configured ? "text-accent-green font-semibold" : "text-zinc-500"}>
-                        {status.configured ? "Configured" : "Not Configured"}
-                      </span>
-                    </div>
-                  ))}
-
-                  {/* System Status Section */}
-                  <div className="pt-3 mt-3 border-t border-border/60">
-                    <h4 className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-2">System Status</h4>
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-center text-xs">
-                        <span className="text-zinc-400">Database</span>
-                        <StatusBadge status={diagnostics?.database_status || "Unknown"} />
-                      </div>
-                      <div className="flex justify-between items-center text-xs">
-                        <span className="text-zinc-400">Redis (Broker/Cache)</span>
-                        <StatusBadge status={diagnostics?.redis_status || "Unknown"} />
-                      </div>
-                      <div className="flex justify-between items-center text-xs">
-                        <span className="text-zinc-400">JWT Signing</span>
-                        <StatusBadge status={diagnostics?.jwt_status || "Unknown"} />
-                      </div>
-                      <div className="flex justify-between items-center text-xs">
-                        <span className="text-zinc-400">Encryption (AES-256)</span>
-                        <StatusBadge status={diagnostics?.encryption_status || "Unknown"} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {!diagnostics && (
-                    <div className="text-center py-4 text-xs text-zinc-500">
-                      Click Refresh to check status.
-                    </div>
+                  {provider.icon}
+                  <span className="text-xs font-semibold">{provider.label.replace(" API Key", "")}</span>
+                  {configured && (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 ml-auto" />
                   )}
-                </div>
-              )}
-            </div>
+                </button>
+              );
+            })}
+          </div>
+          {/* Model selection */}
+          <div className="mt-5 pt-4 border-t border-border/40">
+            <label className="block text-xs font-semibold text-zinc-800 uppercase tracking-wider mb-2">
+              Default Model
+            </label>
+            <select
+              value={defaultModel}
+              onChange={(e) => setDefaultModel(e.target.value)}
+              className="select-glass"
+            >
+              <option value="">Provider default (recommended)</option>
+              {(MODEL_OPTIONS[defaultProvider] || []).map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+            <p className="text-[11px] text-zinc-600 mt-2">
+              If a model is unavailable on your account, the app automatically falls back to an available one.
+            </p>
+          </div>
 
-            {/* Quick Help */}
-            <div className="bg-surface border border-border rounded-xl p-6">
-              <h3 className="font-bold text-white text-sm mb-3">Provider Information</h3>
-              <div className="space-y-2 text-xs text-zinc-400">
-                <p>Configure at least one LLM provider API key to run code reviews.</p>
-                <p>Your default provider is used for all AI scans and explanations.</p>
-                <p>All keys are encrypted (AES-256) before being stored in the database.</p>
-                <div className="pt-2 border-t border-border/40 mt-3">
-                  <p className="text-zinc-500 font-semibold mb-1">Get API Keys:</p>
-                  <ul className="space-y-1">
-                    {Object.entries(PROVIDER_INFO).map(([provider, info]) => (
-                      <li key={provider}>
-                        <a href={info.docsUrl} target="_blank" rel="noopener noreferrer" className="text-accent-blue hover:text-blue-400">
-                          {info.label}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
+          <p className="text-[11px] text-zinc-600 mt-3">
+            You need a valid API key for the selected provider. Falls back to Groq if the selected provider key is missing.
+          </p>
+        </div>
+
+        {/* Save Credentials Form */}
+        <div className="glass-card p-8">
+          <div className="flex items-center gap-3 mb-6 border-b border-border/40 pb-5">
+            <div className="w-10 h-10 rounded-2xl bg-accent-gradient/20 flex items-center justify-center">
+              <Key className="w-5 h-5 text-accent-blue" />
+            </div>
+            <div>
+              <h3 className="font-bold text-zinc-950">Save Credentials</h3>
+              <p className="text-xs text-zinc-700 font-medium">Keys are encrypted with AES-256 before storage</p>
             </div>
           </div>
+
+          <form onSubmit={handleSubmit} className="space-y-5">
+            {PROVIDERS.map((provider) => {
+              const s = getProviderStatus(provider.key);
+              const hasKey = s.status !== "Missing";
+
+              return (
+                <div key={provider.key}>
+                  <label className="block text-xs font-bold text-zinc-800 mb-2 flex items-center gap-1.5">
+                    {provider.icon}
+                    {provider.label}
+                    {provider.category === "llm" && <span className="text-accent-red text-[10px]">*</span>}
+                    {provider.optional && <span className="text-zinc-400 text-[10px] ml-1">(optional)</span>}
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showKeys[provider.key] ? "text" : "password"}
+                      placeholder={hasKey ? "Leave blank to keep current key" : provider.placeholder}
+                      value={formKeys[provider.key]}
+                      onChange={(e) => setFormKeys((prev) => ({ ...prev, [provider.key]: e.target.value }))}
+                      className="input-glass text-sm pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => toggleShowKey(provider.key)}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-zinc-400 hover:text-zinc-700 bg-transparent border-0 cursor-pointer"
+                    >
+                      {showKeys[provider.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  {provider.docsUrl && (
+                    <a href={provider.docsUrl} target="_blank" rel="noopener noreferrer" className="text-[10px] text-accent-blue hover:underline mt-1 inline-block">
+                      Get your key →
+                    </a>
+                  )}
+                </div>
+              );
+            })}
+
+            <div className="pt-2">
+              <button
+                type="submit"
+                disabled={saving}
+                className="btn-primary w-full flex items-center justify-center gap-2 py-3.5"
+              >
+                {saving ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Validating & Saving...</>
+                ) : "Save Credentials"}
+              </button>
+            </div>
+          </form>
         </div>
       </div>
+
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 };

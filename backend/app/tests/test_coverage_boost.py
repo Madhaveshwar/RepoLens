@@ -4,13 +4,13 @@ from uuid import uuid4
 import uuid
 import os
 from fastapi import status, HTTPException
-from backend.app.database.database import SessionLocal
-from backend.app.models.models import (
+from app.database.database import SessionLocal
+from app.models.models import (
     User, Repository, PullRequest, Analysis,
     Report, SecurityFinding, CodeSmell, TestSuggestion, HealthScore
 )
 
-def get_auth_headers(client, email="boost@example.com", password="testpassword"):
+def get_auth_headers(client, email="boost@example.com", password="TestPass123"):
     client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password}
@@ -64,7 +64,7 @@ def test_users_diagnostics(mock_httpx_get, client):
 
 # --- REPORTS GENERATION AND REGENERATION ---
 
-@patch("backend.app.routers.reports.generate_pdf_report")
+@patch("app.routers.reports.generate_pdf_report")
 def test_reports_dynamic_regeneration(mock_gen_pdf, client):
     headers = get_auth_headers(client, "reports_regen@example.com")
     
@@ -131,7 +131,7 @@ def test_reports_dynamic_regeneration(mock_gen_pdf, client):
 
 # --- REPOSITORIES MANAGEMENT ROUTER ---
 
-@patch("backend.app.routers.repositories.GitHubService")
+@patch("app.routers.repositories.GitHubService")
 def test_repositories_endpoints_boost(mock_gh_service_class, client):
     headers = get_auth_headers(client, "repo_boost@example.com")
     
@@ -236,12 +236,12 @@ def test_analysis_management_endpoints(client):
 
 # --- CELERY TASK WORKER TESTS ---
 
-@patch("backend.app.tasks.tasks.redis_client")
-@patch("backend.app.tasks.tasks.GitHubService")
-@patch("backend.app.tasks.tasks.build_groq_client")
-@patch("backend.app.tasks.tasks.review_entire_repository")
-@patch("backend.app.tasks.tasks.os.makedirs")
-@patch("backend.app.tasks.tasks.generate_pdf_report")
+@patch("app.tasks.tasks.redis_client")
+@patch("app.tasks.tasks.GitHubService")
+@patch("app.tasks.tasks.build_llm_client")
+@patch("app.tasks.tasks.review_entire_repository")
+@patch("app.tasks.tasks.os.makedirs")
+@patch("app.tasks.tasks.generate_pdf_report")
 def test_celery_task_full_repo_scan(
     mock_gen_pdf,
     mock_makedirs,
@@ -302,7 +302,7 @@ def test_celery_task_full_repo_scan(
     }
     
     # Call Celery task synchronously
-    from backend.app.tasks.tasks import run_analysis_task
+    from app.tasks.tasks import run_analysis_task
     with patch("builtins.open", MagicMock()):
         run_analysis_task(analysis_id)
         
@@ -324,12 +324,12 @@ def test_celery_task_full_repo_scan(
     db.close()
 
 
-@patch("backend.app.tasks.tasks.redis_client")
-@patch("backend.app.tasks.tasks.GitHubService")
-@patch("backend.app.tasks.tasks.build_groq_client")
-@patch("backend.app.tasks.tasks.review_pull_request")
-@patch("backend.app.tasks.tasks.os.makedirs")
-@patch("backend.app.tasks.tasks.generate_pdf_report")
+@patch("app.tasks.tasks.redis_client")
+@patch("app.tasks.tasks.GitHubService")
+@patch("app.tasks.tasks.build_llm_client")
+@patch("app.tasks.tasks.review_pull_request")
+@patch("app.tasks.tasks.os.makedirs")
+@patch("app.tasks.tasks.generate_pdf_report")
 def test_celery_task_pr_scan(
     mock_gen_pdf,
     mock_makedirs,
@@ -387,7 +387,7 @@ def test_celery_task_pr_scan(
     }
     
     # Call task
-    from backend.app.tasks.tasks import run_analysis_task
+    from app.tasks.tasks import run_analysis_task
     with patch("builtins.open", MagicMock()):
         run_analysis_task(analysis_id)
         
@@ -399,10 +399,10 @@ def test_celery_task_pr_scan(
     db.close()
 
 
-@patch("backend.app.tasks.tasks.redis_client")
-@patch("backend.app.tasks.tasks.GitHubService")
-@patch("backend.app.tasks.tasks.build_groq_client")
-@patch("backend.app.tasks.tasks.review_entire_repository")
+@patch("app.tasks.tasks.redis_client")
+@patch("app.tasks.tasks.GitHubService")
+@patch("app.tasks.tasks.build_llm_client")
+@patch("app.tasks.tasks.review_entire_repository")
 def test_celery_task_failure(
     mock_review_repo,
     mock_build_groq,
@@ -429,20 +429,23 @@ def test_celery_task_failure(
     # Trigger an error during execution
     mock_review_repo.side_effect = Exception("GitHub Rate Limit Exceeded")
     
-    from backend.app.tasks.tasks import run_analysis_task
+    from app.tasks.tasks import run_analysis_task
     run_analysis_task(analysis_id)
     
     # Verify status changed to failed in DB
     db = SessionLocal()
     updated_an = db.query(Analysis).filter_by(id=uuid.UUID(analysis_id)).first()
     assert updated_an.status == "failed"
-    assert "GitHub Rate Limit Exceeded" in updated_an.insights
+    # The task converts raw errors into user-friendly messages.
+    # GitHub-related failures must point the user at their PAT in Settings.
+    assert "GitHub token is invalid" in updated_an.insights
+    assert "Settings" in updated_an.insights
     db.close()
 
 # --- SECURITY SCANNER & PARSER ---
 
 def test_security_scanner_parse_json_from_llm():
-    from backend.app.services.security_scanner import parse_json_from_llm
+    from app.services.security_scanner import parse_json_from_llm
     
     assert parse_json_from_llm("") == []
     assert parse_json_from_llm(None) == []
@@ -466,14 +469,14 @@ def test_security_scanner_parse_json_from_llm():
     assert parse_json_from_llm("This is not JSON at all.") == []
 
 def test_security_scanner_fallback():
-    from backend.app.services.security_scanner import scan_security
+    from app.services.security_scanner import scan_security
     
     mock_client = MagicMock()
     # Mock first choice to raise Exception, second to return success
     mock_chat = MagicMock()
     mock_comp1 = MagicMock()
     mock_comp1.choices = [MagicMock()]
-    mock_comp1.choices[0].message.content = '[{"file": "main.py", "severity": "High"}]'
+    mock_comp1.choices[0].message.content = '[{"file": "main.py", "severity": "High", "issue": "Hardcoded secret found in source code which could lead to credential exposure", "line": 1, "suggestion": "Move the secret to an environment variable and access it via os.getenv() to prevent credential exposure", "why_it_matters": "Hardcoded secrets can be exposed if the repository is compromised"}]'
     
     mock_chat.create.side_effect = [Exception("Groq Llama 70b Rate Limit"), mock_comp1]
     mock_client.chat.completions = mock_chat
@@ -488,20 +491,20 @@ def test_security_scanner_fallback():
         scan_security(mock_client, "main.py", "code", "patch", "Python")
 
 def test_smell_detector_fallback():
-    from backend.app.services.code_smell_detector import detect_code_smells
+    from app.services.code_smell_detector import detect_code_smells
     
     mock_client = MagicMock()
     mock_chat = MagicMock()
     mock_comp1 = MagicMock()
     mock_comp1.choices = [MagicMock()]
-    mock_comp1.choices[0].message.content = '[{"file": "main.py", "severity": "Low"}]'
+    mock_comp1.choices[0].message.content = '[{"file": "main.py", "severity": "High", "issue": "Long Function detected in source code which affects code readability", "line": 1, "suggestion": "Break this long function into smaller focused functions to improve readability and maintainability of the codebase", "why_it_matters": "Long functions are harder to understand, test, and maintain"}]'
     
     mock_chat.create.side_effect = [Exception("Groq Rate Limit"), mock_comp1]
     mock_client.chat.completions = mock_chat
     
     findings = detect_code_smells(mock_client, "main.py", "code", "patch", "Python")
     assert len(findings) == 1
-    assert findings[0]["severity"] == "Low"
+    assert findings[0]["severity"] == "High"
     
     # If both fail
     mock_chat.create.side_effect = [Exception("Failed 1"), Exception("Failed 2")]

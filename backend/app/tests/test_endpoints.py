@@ -3,9 +3,14 @@ from unittest.mock import patch, MagicMock
 from uuid import uuid4
 import uuid
 import os
+from app.database.database import SessionLocal
+from app.models.models import (
+    Repository, Analysis, Report, User,
+    PullRequest, SecurityFinding, CodeSmell, HealthScore
+)
 
 # Helpers to register and login user
-def get_auth_headers(client, email="testendpoints@example.com", password="testpassword"):
+def get_auth_headers(client, email="testendpoints@example.com", password="TestPass123"):
     client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password}
@@ -21,7 +26,7 @@ def get_auth_headers(client, email="testendpoints@example.com", password="testpa
 
 def test_register_duplicate_email(client):
     email = "dup@example.com"
-    password = "password123"
+    password = "Password123"
     client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password}
@@ -35,7 +40,7 @@ def test_register_duplicate_email(client):
 
 def test_login_invalid_credentials(client):
     email = "invalid@example.com"
-    password = "wrongpassword"
+    password = "WrongPass999"
     resp = client.post(
         "/api/v1/auth/login",
         data={"username": email, "password": password}
@@ -49,7 +54,9 @@ def test_users_me_profile(client):
     assert resp.status_code == 200
     assert resp.json()["email"] == "profile@example.com"
 
-def test_users_keys_update(client):
+@patch("app.routers.users.test_github_api", return_value="Connected")
+@patch("app.routers.users.test_llm_api", return_value="Connected")
+def test_users_keys_update(mock_llm, mock_github, client):
     headers = get_auth_headers(client, "keys@example.com")
     resp = client.post(
         "/api/v1/users/keys",
@@ -70,7 +77,7 @@ def test_users_dashboard_metrics(client):
 
 # --- REPOSITORIES ROUTER ---
 
-@patch("backend.app.routers.repositories.GitHubService")
+@patch("app.routers.repositories.GitHubService")
 def test_connect_repository_success(mock_gh_service_class, client):
     headers = get_auth_headers(client, "repo@example.com")
     mock_gh = mock_gh_service_class.return_value
@@ -124,8 +131,8 @@ def test_connect_repository_success(mock_gh_service_class, client):
 
 # --- ANALYSIS ROUTER ---
 
-@patch("backend.app.routers.analysis.run_analysis_task")
-@patch("backend.app.services.github_service.GitHubService")
+@patch("app.routers.analysis.enqueue_analysis_task")
+@patch("app.services.github_service.GitHubService")
 def test_trigger_analysis_endpoints(mock_gh_analysis_class, mock_task, client):
     headers = get_auth_headers(client, "analysis@example.com")
     
@@ -138,7 +145,7 @@ def test_trigger_analysis_endpoints(mock_gh_analysis_class, mock_task, client):
 
     
     # 1. Connect Repo First
-    with patch("backend.app.routers.repositories.GitHubService") as mock_gh_class:
+    with patch("app.routers.repositories.GitHubService") as mock_gh_class:
         mock_gh = mock_gh_class.return_value
         mock_gh.get_repo_details.return_value = {
             "name": "org/repo",
@@ -173,40 +180,8 @@ def test_trigger_analysis_endpoints(mock_gh_analysis_class, mock_task, client):
     assert list_resp.status_code == 200
     assert len(list_resp.json()) == 1
 
-@patch("backend.app.routers.analysis.review_single_code_snippet")
-@patch("backend.app.routers.analysis.build_groq_client")
-def test_review_snippet_endpoint(mock_build_client, mock_review_snippet, client):
-    headers = get_auth_headers(client, "snippet@example.com")
-    
-    # Setup Groq settings key
-    client.post(
-        "/api/v1/users/keys",
-        json={"groq_api_key": "dummy-groq-key"},
-        headers=headers
-    )
-
-    mock_review_snippet.return_value = {
-        "risk_score": 15,
-        "findings": [],
-        "test_suggestions": "No suggestions",
-        "severity_counts": {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0},
-        "latency_seconds": 0.5,
-        "scores": {"maintainability": 90, "security": 100, "testing": 85, "code_quality": 85},
-        "is_valid_code": True,
-        "detected_language": "Python",
-        "optimization_required": False,
-        "optimized_code": None,
-        "quality_score": 85,
-        "validation_message": "Code snippet is valid."
-    }
-
-    resp = client.post(
-        "/api/v1/analysis/snippet",
-        json={"code": "def hello(): print('hi')", "language": "Python"},
-        headers=headers
-    )
-    assert resp.status_code == 200
-    assert resp.json()["risk_score"] == 15
+# Local Review endpoints were removed; review_single_code_snippet remains only as a
+# shared helper for /analysis/validate-fix-code.
 
 # --- REPORTS ROUTER ---
 
@@ -219,10 +194,6 @@ def test_download_report_endpoints(client):
     assert isinstance(list_resp.json(), list)
 
     # Seed dummy repository & analysis & report in DB
-    from backend.app.database.database import SessionLocal
-    from backend.app.models.models import Repository, Analysis, Report, User
-    import uuid
-    
     db = SessionLocal()
     user = db.query(User).filter_by(email="reports@example.com").first()
     
@@ -265,8 +236,6 @@ def test_findings_details_endpoints(client):
     headers = get_auth_headers(client, "findings@example.com")
     
     # Seed DB analysis first to avoid 404
-    from backend.app.database.database import SessionLocal
-    from backend.app.models.models import Repository, Analysis, User
     db = SessionLocal()
     user = db.query(User).filter_by(email="findings@example.com").first()
     repo = Repository(user_id=user.id, name="owner/repo", default_branch="main")
@@ -301,13 +270,11 @@ def test_health_check_endpoint(client):
 
 # --- PULL REQUESTS ROUTER ---
 
-@patch("backend.app.routers.pull_requests.GitHubService")
+@patch("app.routers.pull_requests.GitHubService")
 def test_pull_requests_endpoints(mock_gh_service_class, client):
     headers = get_auth_headers(client, "prs@example.com")
     
     # Seed DB objects
-    from backend.app.database.database import SessionLocal
-    from backend.app.models.models import Repository, PullRequest, Analysis, User, SecurityFinding, CodeSmell
     db = SessionLocal()
     user = db.query(User).filter_by(email="prs@example.com").first()
     repo = Repository(user_id=user.id, name="owner/repo", default_branch="main")
@@ -368,13 +335,11 @@ def test_pull_requests_endpoints(mock_gh_service_class, client):
 
 # --- REPOSITORIES PR SYNC ---
 
-@patch("backend.app.routers.repositories.GitHubService")
+@patch("app.routers.repositories.GitHubService")
 def test_repositories_list_prs_sync(mock_gh_service_class, client):
     headers = get_auth_headers(client, "repoprs@example.com")
     
     # Seed DB repo
-    from backend.app.database.database import SessionLocal
-    from backend.app.models.models import Repository, PullRequest, User
     db = SessionLocal()
     user = db.query(User).filter_by(email="repoprs@example.com").first()
     repo = Repository(user_id=user.id, name="owner/repo_prs", default_branch="main")
@@ -445,10 +410,6 @@ def test_repositories_list_prs_sync(mock_gh_service_class, client):
 def test_users_dashboard_metrics_with_repos(client):
     headers = get_auth_headers(client, "dash_metrics@example.com")
     
-    from backend.app.database.database import SessionLocal
-    from backend.app.models.models import (
-        Repository, Analysis, SecurityFinding, HealthScore, User
-    )
     db = SessionLocal()
     user = db.query(User).filter_by(email="dash_metrics@example.com").first()
     

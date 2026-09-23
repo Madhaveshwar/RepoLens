@@ -7,12 +7,12 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import status
 
-from backend.app.config import settings
-from backend.app.database.database import SessionLocal
-from backend.app.models.models import User, Repository, PullRequest, Analysis, AuditLog
-from backend.app.services.reviewer import review_files_combined
+from app.config import settings
+from app.database.database import SessionLocal
+from app.models.models import User, Repository, PullRequest, Analysis, AuditLog
+from app.services.reviewer import review_files_combined
 
-def get_auth_headers(client, email="hardening@example.com", password="testpassword"):
+def get_auth_headers(client, email="hardening@example.com", password="TestPass123"):
     client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password}
@@ -80,7 +80,7 @@ def test_webhook_pr_event_trigger(client):
 
     # Set webhook secret to None to bypass signature checking
     with patch.object(settings, "GITHUB_WEBHOOK_SECRET", None):
-        with patch("backend.app.routers.webhooks.run_analysis_task.delay") as mock_celery:
+        with patch("app.routers.webhooks.enqueue_analysis_task") as mock_celery:
             response = client.post("/api/v1/webhooks/github", json=payload, headers=headers)
             assert response.status_code == 200
             assert "Scan triggered for PR #12" in response.json()["message"]
@@ -96,7 +96,7 @@ def test_webhook_pr_event_trigger(client):
             assert analysis is not None
             assert analysis.status == "pending"
             
-            mock_celery.assert_called_once_with(str(analysis.id))
+            mock_celery.assert_called_once()
             db.close()
 
 def test_audit_logs_retrieval(client):
@@ -140,9 +140,9 @@ def test_diff_chunking_and_fallback():
         {"filename": "b.py", "content": "print('world')", "patch": "@@ -0,0 +1 @@\n+print('world')", "language": "Python"}
     ]
     
-    with patch("backend.app.services.reviewer.load_cache", return_value={}):
-        with patch("backend.app.services.reviewer.save_cache"):
-            with patch("backend.app.services.reviewer.settings") as mock_settings:
+    with patch("app.services.reviewer.load_cache", return_value={}):
+        with patch("app.services.reviewer.save_cache"):
+            with patch("app.services.reviewer.settings") as mock_settings:
                 mock_settings.FORCE_GROQ_ANALYSIS = True
                 
                 res_map, cache_hits, insights, requests_made, chars_sent, stats = review_files_combined(

@@ -2,10 +2,10 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
-from backend.app.database.database import get_async_db
-from backend.app.models.models import User, AuditLog
-from backend.app.schemas.schemas import AuditLogOut
-from backend.app.auth.security import get_current_user
+from app.database.database import get_async_db
+from app.models.models import User, AuditLog
+from app.schemas.schemas import AuditLogOut
+from app.auth.security import get_current_user
 
 router = APIRouter(prefix="/audit-logs", tags=["audit-logs"])
 

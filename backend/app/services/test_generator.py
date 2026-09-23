@@ -1,8 +1,9 @@
 from typing import Any
 from langsmith import traceable
-from backend.app.utils.prompts import SYSTEM_TEST_PROMPT, build_test_prompt
+from app.utils.prompts import SYSTEM_TEST_PROMPT, build_test_prompt
+from app.services.llm_client import GROQ_FALLBACK_MODEL
 
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "openai/gpt-oss-120b"
 
 @traceable(name="Test Suggestions Generation")
 def generate_tests(
@@ -16,7 +17,7 @@ def generate_tests(
     if not code.strip():
         return "No code provided to generate tests."
     prompt = build_test_prompt(filename, code, language)
-    active_model = "llama-3.3-70b-versatile"
+    active_model = MODEL_NAME
     try:
         chat_completion = client.chat.completions.create(
             messages=[
@@ -34,11 +35,11 @@ def generate_tests(
                     {"role": "system", "content": SYSTEM_TEST_PROMPT},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama-3.1-8b-instant",
+                model=GROQ_FALLBACK_MODEL,
                 temperature=temperature,
             )
             result_text = chat_completion.choices[0].message.content
         except Exception as fallback_e:
-            from backend.app.services.reviewer import handle_groq_error
+            from app.services.reviewer import handle_groq_error
             raise handle_groq_error(fallback_e)
     return result_text or "Failed to generate test suggestions."

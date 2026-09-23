@@ -4,10 +4,10 @@ from sqlalchemy import select
 from typing import List
 import uuid
 
-from backend.app.database.database import get_async_db
-from backend.app.models.models import User, CodeSmell, Analysis, Repository
-from backend.app.schemas.schemas import CodeSmellOut
-from backend.app.auth.security import get_current_user
+from app.database.database import get_async_db
+from app.models.models import User, CodeSmell, Analysis, Repository
+from app.schemas.schemas import CodeSmellOut
+from app.auth.security import get_current_user
 
 router = APIRouter(prefix="/code-quality", tags=["Code Quality"])
 

@@ -1,15 +1,17 @@
 import React, { useEffect, useState } from "react";
 import axios from "../lib/api";
 import { useRepositoryStore } from "../store/repositoryStore";
+import { useAuthStore } from "../store/authStore";
 import type { PullRequest } from "../store/repositoryStore";
 import { useAnalysisStore } from "../store/analysisStore";
 import {
   ArrowLeft, GitPullRequest, BookOpen,
   Play, Loader2, Download, Clock, Check, RefreshCw,
   Folder, File, ChevronRight, ChevronDown, Save, X, Code, Lightbulb, ExternalLink,
-  ShieldCheck, GitBranch
+  AlertTriangle
 } from "lucide-react";
 import Editor from "@monaco-editor/react";
+import { Markdown } from "../components/Markdown";
 import { useQuery } from "@tanstack/react-query";
 
 interface RepositoryDetailProps {
@@ -37,7 +39,7 @@ const FileTreeItem: React.FC<{
       <button
         onClick={() => onSelectFile(node.path)}
         className={`w-full flex items-center gap-2 px-2 py-1 text-[11px] text-left rounded-md transition-colors truncate ${
-          isSelected ? "bg-accent-blue/15 text-accent-blue font-semibold border-l-2 border-accent-blue" : "text-zinc-400 hover:text-white hover:bg-zinc-800/40"
+          isSelected ? "bg-accent-blue/15 text-accent-blue font-bold border-l-2 border-accent-blue" : "text-zinc-700 hover:text-zinc-950 hover:bg-zinc-100"
         }`}
       >
         <File className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
@@ -50,7 +52,7 @@ const FileTreeItem: React.FC<{
     <div className="space-y-0.5">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-1.5 px-2 py-1 text-[11px] text-left text-zinc-300 hover:text-white hover:bg-zinc-800/30 rounded-md transition-colors"
+        className="w-full flex items-center gap-1.5 px-2 py-1 text-[11px] text-left text-zinc-800 font-semibold hover:text-zinc-950 hover:bg-zinc-100 rounded-md transition-colors"
       >
         {expanded ? (
           <ChevronDown className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
@@ -79,9 +81,14 @@ const FileTreeItem: React.FC<{
 
 export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSelectPr }) => {
   const { activeRepo, prs } = useRepositoryStore();
+  const { user } = useAuthStore();
+  const hasLlmKey = user ? (
+    user.has_groq_api_key || user.has_openai_api_key ||
+    user.has_claude_api_key || user.has_gemini_api_key || user.has_openrouter_api_key
+  ) : false;
   const {
     analyses, activeAnalysis, securityFindings, codeSmells, testSuggestions,
-    progress, progressDetailed, triggerAnalysis, fetchRepoAnalyses,
+    progress, progressDetailed, triggerAnalysis, error: analysisError,
     fetchAnalysisDetails, resetProgress, deleteAnalysis, deleteAllHistory
   } = useAnalysisStore();
 
@@ -107,7 +114,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
     refetchOnReconnect: false,
   });
 
-  const { data: analysesData, refetch: refetchRepoAnalyses } = useQuery({
+  const { data: analysesData } = useQuery({
     queryKey: ["analyses", activeRepo?.id],
     queryFn: async () => {
       if (!activeRepo) return [];
@@ -157,37 +164,27 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
   const [openFilePath, setOpenFilePath] = useState<string | null>(null);
   const [openFileContent, setOpenFileContent] = useState("");
-  const [editorOriginalContent, setEditorOriginalContent] = useState("");
-  const [editorUnsaved, setEditorUnsaved] = useState(false);
+  // [REMOVED] editorOriginalContent, editorUnsaved — read-only explorer
   const [monacoEditor, setMonacoEditor] = useState<any>(null);
   const [monacoInstance, setMonacoInstance] = useState<any>(null);
   const [decorations, setDecorations] = useState<string[]>([]);
-  const [showCommitModal, setShowCommitModal] = useState(false);
-  const [commitMsg, setCommitMsg] = useState("Direct code update from browser");
-  const [saveLoading, setSaveLoading] = useState(false);
+  // [REMOVED] showCommitModal, commitMsg, saveLoading — commit modal removed
+  // This project does not modify repositories
 
   // Explain states
   const [explainFinding, setExplainFinding] = useState<{ id: string; type: "security" | "code_smell" } | null>(null);
   const [explainLoading, setExplainLoading] = useState(false);
   const [explainResult, setExplainResult] = useState<string | null>(null);
 
-  // Validate Fix states
-  const [validateResult, setValidateResult] = useState<{ status: string; details: string; remaining_issues: any[] } | null>(null);
-  const [validating, setValidating] = useState(false);
-  const [showValidateModal, setShowValidateModal] = useState(false);
 
-  // Deploy states
-  const [deployInstructions, setDeployInstructions] = useState<{
-    steps: string[];
-    commit_suggestion: string;
-    pr_title_suggestion: string;
-    pr_description_suggestion: string;
-  } | null>(null);
-  const [deployLoading, setDeployLoading] = useState(false);
-  const [showDeployModal, setShowDeployModal] = useState(false);
+  // [REMOVED] rescanVerification — rescan/verification feature removed
+  // [REMOVED] verificationLoading, setVerificationLoading — rescan verification removed
 
-  // Push to GitHub states
-  const [pushingToGitHub, setPushingToGitHub] = useState(false);
+  // [REMOVED] Fix All states — this project does not modify repositories
+  // All auto-fix, batch-fix, PR creation, and deploy features have been removed.
+  // Only Generate Fix (shows suggestions) and Explain Issue remain.
+
+  // [REMOVED] Validate Fix, Deploy Changes, Push to GitHub — this project does not modify repositories
 
   // Fetch Tree
   const fetchExplorerTree = async () => {
@@ -197,10 +194,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
   // Fetch File Content
   const handleSelectFile = async (path: string): Promise<void> => {
     if (!activeRepo) return;
-    if (editorUnsaved) {
-      const confirmDiscard = window.confirm("You have unsaved changes in the current file. Discard changes?");
-      if (!confirmDiscard) return;
-    }
+    // [REMOVED] unsaved changes check — read-only explorer
     
     // Clear residual Monaco decorations
     if (monacoEditor && decorations.length > 0) {
@@ -210,42 +204,18 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
     
     setOpenFilePath(path);
     setOpenFileContent("");
-    setEditorOriginalContent("");
-    setEditorUnsaved(false);
     
     try {
       const res = await axios.get(`/repositories/${activeRepo.id}/files`, {
         params: { path }
       });
       setOpenFileContent(res.data.content);
-      setEditorOriginalContent(res.data.content);
     } catch (err: any) {
       alert(err.response?.data?.detail || "Failed to download file content from GitHub.");
     }
   };
 
-  // Save File Content
-  const handleSaveFile = async () => {
-    if (!activeRepo || !openFilePath) return;
-    setSaveLoading(true);
-    try {
-      await axios.post(`/repositories/${activeRepo.id}/files`, {
-        path: openFilePath,
-        content: openFileContent,
-        commit_message: commitMsg
-      });
-      alert("File saved successfully! A background re-scan has been triggered.");
-      setEditorOriginalContent(openFileContent);
-      setEditorUnsaved(false);
-      setShowCommitModal(false);
-      // Refresh analyses
-      if (activeRepo) fetchRepoAnalyses(activeRepo.id);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || "Failed to save file on GitHub.");
-    } finally {
-      setSaveLoading(false);
-    }
-  };
+  // [REMOVED] handleSaveFile — this project does not modify repositories
 
   // Jump to Line number in Monaco editor
   const handleJumpToLine = async (filePath: string, line: number) => {
@@ -294,87 +264,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
     }
   };
 
-  // Validate Fix
-  const handleValidateFix = async () => {
-    if (!activeAnalysis || !openFilePath) return;
-    setValidating(true);
-    setValidateResult(null);
-    setShowValidateModal(true);
-    try {
-      const res = await axios.post("/analysis/validate-fix", {
-        analysis_id: activeAnalysis.id,
-        file_path: openFilePath,
-        original_content: editorOriginalContent,
-        edited_content: openFileContent
-      });
-      setValidateResult(res.data);
-    } catch (err: any) {
-      setValidateResult({
-        status: "error",
-        details: err.response?.data?.detail || "Validation failed",
-        remaining_issues: []
-      });
-    } finally {
-      setValidating(false);
-    }
-  };
-
-  // Deploy Changes
-  const handleDeployChanges = async () => {
-    if (!activeAnalysis) return;
-    setDeployLoading(true);
-    setDeployInstructions(null);
-    setShowDeployModal(true);
-    try {
-      const res = await axios.post("/analysis/deploy-instructions", {
-        analysis_id: activeAnalysis.id,
-        branch: activeRepo?.default_branch || "main"
-      });
-      setDeployInstructions(res.data);
-    } catch (err: any) {
-      setDeployInstructions({
-        steps: ["Failed to generate deploy instructions."],
-        commit_suggestion: "",
-        pr_title_suggestion: "",
-        pr_description_suggestion: ""
-      });
-    } finally {
-      setDeployLoading(false);
-    }
-  };
-
-  // Push to GitHub
-  const handlePushToGitHub = async () => {
-    if (!activeRepo || !openFilePath) return;
-    setPushingToGitHub(true);
-    try {
-      const commitMsg = `Fix: ${openFilePath} - AI-guided code remediation`;
-      await axios.post(`/repositories/${activeRepo.id}/git-push`, {
-        repository_id: activeRepo.id,
-        file_path: openFilePath,
-        file_content: openFileContent,
-        commit_message: commitMsg,
-        branch: activeRepo.default_branch || "main"
-      });
-      alert("Changes pushed to GitHub successfully! A new commit has been created. A background re-scan will now trigger.");
-      setEditorOriginalContent(openFileContent);
-      setEditorUnsaved(false);
-      // Trigger automatic re-scan after successful push
-      if (activeRepo) {
-        try {
-          resetProgress();
-          await triggerAnalysis(activeRepo.id);
-          refetchRepoAnalyses();
-        } catch (scanErr) {
-          console.error("Background re-scan trigger failed:", scanErr);
-        }
-      }
-    } catch (err: any) {
-      alert(err.response?.data?.detail || "Failed to push to GitHub. Check your PAT has push access.");
-    } finally {
-      setPushingToGitHub(false);
-    }
-  };
+  // [REMOVED] handleValidateFix, handleDeployChanges, handlePushToGitHub — this project does not modify repositories
 
   const handleEditorDidMount = (editor: any, monaco: any) => {
     setMonacoEditor(editor);
@@ -479,7 +369,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
       // and call fetchAnalysisDetails on completion, which updates
       // the store and React Query indirectly.
     } catch (err) {
-      console.error(err);
+      // Handle scan trigger error
     }
   };
 
@@ -514,102 +404,129 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
           link.click();
           link.remove();
           window.URL.revokeObjectURL(url);
-        }).catch(err => {
-          console.error(err);
+        }).catch(() => {
           alert(`Failed to download report content for ${type}.`);
         });
       } else {
         alert(`${type} report file generation in progress or failed.`);
       }
-    }).catch(err => {
-      console.error(err);
+    }).catch(() => {
       alert("Failed to fetch reports index.");
     });
-  };
-
+  };  // [REMOVED] handleGenerateFix — removed per spec (Generate Fix button removed)
+  // [REMOVED] handleRescanAndVerify — this project does not modify repositories
+  // [REMOVED] handleFixAllAndPr — this project does not modify repositories
+  // [REMOVED] handleSaveFile — commit/save modal was removed
   if (!activeRepo) return null;
 
   return (
     <div className="flex-1 p-8 overflow-y-auto max-h-screen">
       {/* Header breadcrumb */}
-      <button onClick={onBack} className="flex items-center gap-2 text-zinc-400 hover:text-white text-xs mb-4">
+      <button onClick={onBack} className="flex items-center gap-2 text-zinc-700 hover:text-zinc-950 text-xs font-semibold mb-4 transition-colors">
         <ArrowLeft className="w-4 h-4" />
         Back to Dashboard
       </button>
 
-      <div className="flex justify-between items-start mb-6">
-        <div>
-          <div className="flex items-center gap-3">
-            <BookOpen className="w-6 h-6 text-accent-blue" />
-            <h1 className="text-2xl font-extrabold text-white">{activeRepo.name}</h1>
-          </div>
-          <p className="text-sm text-muted mt-1">{activeRepo.description}</p>
-          {activeRepo.permissions && (
-            <div className="flex flex-wrap gap-2 mt-2 font-sans select-none">
-              <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                activeRepo.permissions.pull
-                  ? "bg-green-500/10 text-accent-green border-green-500/20"
-                  : "bg-red-500/10 text-accent-red border-red-500/20"
-              }`}>
-                PULL: {activeRepo.permissions.pull ? "YES" : "NO"}
-              </span>
-              <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                activeRepo.permissions.push
-                  ? "bg-green-500/10 text-accent-green border-green-500/20"
-                  : "bg-red-500/10 text-accent-red border-red-500/20"
-              }`}>
-                PUSH: {activeRepo.permissions.push ? "YES" : "NO"}
-              </span>
-              <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                activeRepo.permissions.admin
-                  ? "bg-purple-500/10 text-purple-400 border-purple-500/20"
-                  : "bg-zinc-800 text-zinc-400 border-zinc-700"
-              }`}>
-                ADMIN: {activeRepo.permissions.admin ? "YES" : "NO"}
-              </span>
-            </div>
-          )}
-        </div>
+      {/* Premium Hero Section */}
+      <div className="glass-hero p-8 mb-8 relative overflow-hidden">
+        <div className="absolute inset-0 bg-card-glow-blue pointer-events-none" />
+        <div className="relative z-10">
+          <div className="flex justify-between items-start flex-wrap gap-4">
+            <div>
+              <div className="flex items-center gap-3 mb-2">
+                <div className="w-10 h-10 rounded-2xl bg-accent-gradient flex items-center justify-center shadow-glow-blue">
+                  <BookOpen className="w-5 h-5 text-zinc-900" />
+                </div>
+                <h1 className="text-3xl font-bold text-zinc-900">{activeRepo.name}</h1>
+              </div>
+              <p className="text-sm text-zinc-700 mt-1 max-w-xl font-medium">{activeRepo.description}</p>
+              
+              {/* Stats row */}
+              <div className="flex flex-wrap items-center gap-4 mt-4 text-xs">
+                <span className="glass px-3 py-1.5 rounded-xl text-zinc-500 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-accent-green" />
+                  {activeRepo.default_branch}
+                </span>
+                {activeRepo.stars > 0 && (
+                  <span className="text-zinc-500">⭐ {activeRepo.stars}</span>
+                )}
+                {activeAnalysis?.status === "completed" && (
+                  <>
+                    <span className="text-zinc-500">Risk: <strong className={activeAnalysis.risk_score > 60 ? 'text-accent-red' : 'text-accent-green'}>{activeAnalysis.risk_score}</strong></span>
+                    <span className="text-zinc-500">Security: <strong className="text-accent-blue">{securityFindings.length} issues</strong></span>
+                  </>
+                )}
+              </div>
 
-        <div className="flex items-center gap-3 font-sans">
-          <button
-            onClick={() => setShowDisconnectModal(true)}
-            disabled={showProgress || actionLoading}
-            className="border border-border hover:bg-zinc-800 disabled:opacity-40 text-zinc-300 font-semibold text-xs px-3.5 py-2.5 rounded-lg transition-colors"
-          >
-            Disconnect
-          </button>
-          <button
-            onClick={() => setShowDeleteRepoModal(true)}
-            disabled={showProgress || actionLoading}
-            className="border border-red-500/20 hover:bg-red-500/10 disabled:opacity-40 text-red-400 font-semibold text-xs px-3.5 py-2.5 rounded-lg transition-colors"
-          >
-            Delete Repo
-          </button>
-          <button
-            onClick={handleRunAnalysis}
-            disabled={showProgress}
-            className="flex items-center gap-2 bg-accent-blue hover:bg-blue-600 disabled:opacity-50 text-white font-semibold text-xs px-4 py-2.5 rounded-lg transition-colors shadow-lg shadow-accent-blue/15"
-          >
-            {showProgress ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Scanning...
-              </>
-            ) : (
-              <>
-                <Play className="w-3.5 h-3.5 fill-current" />
-                Scan Repository
-              </>
-            )}
-          </button>
+    
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setShowDisconnectModal(true)}
+                disabled={showProgress || actionLoading}
+                className="btn-secondary"
+              >
+                Disconnect
+              </button>
+              <button
+                onClick={() => setShowDeleteRepoModal(true)}
+                disabled={showProgress || actionLoading}
+                className="btn-danger"
+              >
+                Delete Repo
+              </button>
+              <button
+                onClick={() => {
+                  if (!hasLlmKey) {
+                    return;
+                  }
+                  handleRunAnalysis();
+                }}
+                title={!hasLlmKey ? "Please configure an LLM API key in Settings first before scanning." : "Run a full AI scan on this repository"}
+                disabled={showProgress}
+                className={`btn-primary flex items-center gap-2 ${!hasLlmKey ? "cursor-not-allowed opacity-70" : ""}`}
+              >
+                {!hasLlmKey && !showProgress ? (
+                  <>
+                    <AlertTriangle className="w-4 h-4" />
+                    Configure API Key First
+                  </>
+                ) : showProgress ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Scanning...
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    Scan Repository
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
+      {/* Scan trigger / analysis error banner */}
+      {!showProgress && analysisError && (
+        <div className="mb-6 bg-red-50 border border-red-300 text-red-700 p-4 rounded-2xl text-sm font-semibold flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-bold">Scan could not be completed</p>
+            <p className="font-medium mt-0.5">{analysisError}</p>
+            <p className="text-xs font-medium text-red-600 mt-1">
+              Check your LLM provider API key and model in Settings, and your GitHub PAT, then try again.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Live progress stream */}
       {showProgress && (
-        <div className="bg-surface border border-border rounded-xl p-6 mb-6 font-sans text-xs text-zinc-300 space-y-4">
-          <div className="flex justify-between items-center text-sm font-bold text-white">
+        <div className="glass-card p-6 mb-6 space-y-4">
+          <div className="flex justify-between items-center text-sm font-bold text-zinc-900">
             <span className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-accent-orange animate-ping" />
               Scanning Repository
@@ -617,37 +534,33 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
             <span className="text-accent-orange">{progress}%</span>
           </div>
           
-          <div className="text-zinc-700 text-sm font-bold tracking-wider select-none leading-none font-mono">
-            {"â–ˆ".repeat(Math.round((progress / 100) * 20)) + "â–‘".repeat(20 - Math.round((progress / 100) * 20))}
+          <div className="progress-bar">
+            <div className="progress-bar-fill relative" style={{ width: `${Math.min(progress, 100)}%` }}>
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent shimmer" />
+            </div>
           </div>
           
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-3 border-y border-border/40 text-[11px]">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-3 border-y border-border/40 text-xs">
             <div>
               <span className="text-zinc-500 block uppercase font-bold text-[9px] tracking-wider">Status</span>
-              <span className="text-zinc-300 font-semibold uppercase">{progressDetailed?.status || "Processing"}</span>
+              <span className="text-zinc-600 font-semibold uppercase">{progressDetailed?.status || "Processing"}</span>
             </div>
             <div>
               <span className="text-zinc-500 block uppercase font-bold text-[9px] tracking-wider">Files Scanned</span>
-              <span className="text-zinc-300 font-semibold">{progressDetailed?.files_analyzed || 0} / {progressDetailed?.total_files || 0}</span>
+              <span className="text-zinc-600 font-semibold">{progressDetailed?.files_analyzed || 0} / {progressDetailed?.total_files || 0}</span>
             </div>
             <div>
-              <span className="text-zinc-500 block uppercase font-bold text-[9px] tracking-wider">Elapsed Time</span>
-              <span className="text-zinc-300 font-semibold flex items-center gap-1">
-                <Clock className="w-3.5 h-3.5 text-zinc-400" />
-                {formatTime(elapsedTime)}
-              </span>
+              <span className="text-zinc-500 block uppercase font-bold text-[9px] tracking-wider">Elapsed</span>
+              <span className="text-zinc-600 font-semibold flex items-center gap-1"><Clock className="w-3.5 h-3.5 text-zinc-500" />{formatTime(elapsedTime)}</span>
             </div>
             <div>
               <span className="text-zinc-500 block uppercase font-bold text-[9px] tracking-wider">Est. Remaining</span>
-              <span className="text-zinc-300 font-semibold flex items-center gap-1">
-                <RefreshCw className="w-3.5 h-3.5 text-zinc-400 animate-spin" style={{ animationDuration: '4s' }} />
-                {getEstimatedRemaining()}
-              </span>
+              <span className="text-zinc-600 font-semibold flex items-center gap-1"><RefreshCw className="w-3.5 h-3.5 text-zinc-500 animate-spin" style={{ animationDuration: '4s' }} />{getEstimatedRemaining()}</span>
             </div>
           </div>
           
           {progressDetailed?.current_file && (
-            <div className="pt-1">
+            <div>
               <span className="text-zinc-500 block uppercase font-bold text-[9px] tracking-wider mb-1">Current File</span>
               <span className="text-accent-blue font-mono font-semibold truncate block max-w-full" title={progressDetailed.current_file}>
                 {progressDetailed.current_file}
@@ -655,7 +568,6 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
             </div>
           )}
 
-          {/* Sequential Step Timeline */}
           <div className="pt-3 border-t border-border/40">
             <span className="text-zinc-500 block uppercase font-bold text-[9px] tracking-wider mb-3">Scan Stages</span>
             <div className="grid grid-cols-1 md:grid-cols-7 gap-3">
@@ -682,31 +594,24 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                 const isCompleted = idx < currentIdx;
                 const isActive = idx === currentIdx;
 
-                let iconNode = <div className="w-4 h-4 rounded-full border border-zinc-700 bg-background" />;
+                let iconNode = <div className="w-4 h-4 rounded-full border border-white/10 bg-background" />;
                 let textClass = "text-zinc-500";
-                let containerBorder = "border-border/30 bg-zinc-900/10";
+                let containerBorder = "border-border/30 bg-white/[0.02]";
 
                 if (isCompleted) {
                   iconNode = <Check className="w-3.5 h-3.5 text-accent-green" />;
-                  textClass = "text-zinc-300 font-medium";
-                  containerBorder = "border-green-500/20 bg-green-500/5";
+                  textClass = "text-zinc-600 font-medium";
+                  containerBorder = "border-accent-green/20 bg-accent-green/[0.03]";
                 } else if (isActive) {
                   iconNode = <Loader2 className="w-3.5 h-3.5 text-accent-blue animate-spin" />;
                   textClass = "text-accent-blue font-bold";
-                  containerBorder = "border-accent-blue/30 bg-accent-blue/5 shadow-md shadow-accent-blue/5";
+                  containerBorder = "border-accent-blue/30 bg-accent-blue/[0.05]";
                 }
 
                 return (
-                  <div
-                    key={idx}
-                    className={`flex md:flex-col items-center gap-2 md:gap-1.5 p-2 rounded-lg border ${containerBorder} transition-all duration-150`}
-                  >
-                    <div className="flex items-center justify-center w-5 h-5">
-                      {iconNode}
-                    </div>
-                    <span className={`text-[10px] md:text-center leading-tight ${textClass}`}>
-                      {stageName}
-                    </span>
+                  <div key={idx} className={`flex md:flex-col items-center gap-2 md:gap-1.5 p-2 rounded-2xl border ${containerBorder} transition-all duration-150`}>
+                    <div className="flex items-center justify-center w-5 h-5">{iconNode}</div>
+                    <span className={`text-[10px] md:text-center leading-tight ${textClass}`}>{stageName}</span>
                   </div>
                 );
               })}
@@ -716,11 +621,11 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
       )}
 
       {/* Tabs Menu */}
-      <div className="border-b border-border flex gap-4 mb-6">
+      <div className="border-b border-border/60 flex gap-6 mb-6">
         {[
           { id: "overview", name: "Overview" },
           { id: "explorer", name: "Code Explorer" },
-          { id: "prs", name: `Pull Requests (${prs.length})` },
+          { id: "prs", name: `PRs (${prs.length})` },
           { id: "security", name: "Security" },
           { id: "quality", name: "Code Quality" },
           { id: "tests", name: "Tests" },
@@ -729,10 +634,10 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`pb-3 text-xs font-semibold uppercase tracking-wider border-b-2 transition-colors ${
+            className={`pb-3.5 text-xs font-semibold tracking-wider border-b-2 transition-all ${
               activeTab === tab.id
                 ? "border-accent-blue text-accent-blue"
-                : "border-transparent text-zinc-400 hover:text-white"
+                : "border-transparent text-zinc-500 hover:text-zinc-600 hover:border-white/20"
             }`}
           >
             {tab.name}
@@ -747,28 +652,37 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Left info */}
             <div className="lg:col-span-2 space-y-6">
-              <div className="bg-surface border border-border rounded-xl p-6">
-                <h3 className="font-bold text-white mb-4">Repository Analytics Dashboard</h3>
-                <div className="grid grid-cols-3 gap-4 text-center">
-                  <div className="bg-background border border-border p-4 rounded-lg">
+              <div className="glass-card p-6">
+                <h3 className="font-bold text-zinc-900 text-sm mb-5">Repository Analytics</h3>
+                <div className="grid grid-cols-3 gap-4 text-center stagger-children">
+                  <div className="glass p-5 rounded-2xl hover:-translate-y-0.5 transition-all duration-300">
                     <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Health Rating</p>
-                    <h4 className="text-2xl font-extrabold mt-1 text-accent-green">
-                      {activeAnalysis?.status === "completed" && activeAnalysis?.risk_score !== undefined
-                        ? `${100 - activeAnalysis.risk_score}/100`
-                        : activeAnalysis?.status === "pending" || activeAnalysis?.status === "running"
-                          ? "..."
-                          : "N/A"}
-                    </h4>
+                    {activeAnalysis?.status === "completed" && activeAnalysis?.health_score !== undefined ? (
+                      <h4 className="text-2xl font-bold font-sans mt-1.5 text-accent-green">
+                        {activeAnalysis.health_score}/100
+                      </h4>
+                    ) : activeAnalysis?.status === "completed" && activeAnalysis?.risk_score !== undefined ? (
+                      <h4 className="text-2xl font-bold font-sans mt-1.5 text-accent-green">
+                        {Math.max(0, 100 - activeAnalysis.risk_score)}/100
+                      </h4>
+                    ) : activeAnalysis?.status === "pending" || activeAnalysis?.status === "running" ? (
+                      <h4 className="text-2xl font-bold font-sans mt-1.5 text-zinc-500">...</h4>
+                    ) : (
+                      <div className="mt-2">
+                        <p className="text-xs text-zinc-500 italic">Health score unavailable</p>
+                        <p className="text-[10px] text-zinc-400 mt-0.5">Run a repository scan</p>
+                      </div>
+                    )}
                   </div>
-                  <div className="bg-background border border-border p-4 rounded-lg">
+                  <div className="glass p-5 rounded-2xl hover:-translate-y-0.5 transition-all duration-300">
                     <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Security Risks</p>
-                    <h4 className="text-2xl font-extrabold mt-1 text-accent-red">
+                    <h4 className="text-2xl font-bold font-sans mt-1.5 text-accent-red">
                       {activeAnalysis?.status === "completed" ? securityFindings.length : "-"}
                     </h4>
                   </div>
-                  <div className="bg-background border border-border p-4 rounded-lg">
-                    <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Smells & Issues</p>
-                    <h4 className="text-2xl font-extrabold mt-1 text-accent-orange">
+                  <div className="glass p-5 rounded-2xl hover:-translate-y-0.5 transition-all duration-300">
+                    <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Code Issues</p>
+                    <h4 className="text-2xl font-bold font-sans mt-1.5 text-accent-orange">
                       {activeAnalysis?.status === "completed" ? codeSmells.length : "-"}
                     </h4>
                   </div>
@@ -776,42 +690,36 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
               </div>
 
               {activeAnalysis?.status === "completed" && (
-                <div className="bg-surface border border-border rounded-xl p-6">
-                  <h3 className="font-bold text-white mb-4">AI Statistics</h3>
-                  <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
-                    <div className="bg-background border border-border p-4 rounded-lg text-left">
+                <div className="glass-card p-6">
+                  <h3 className="font-bold text-zinc-900 text-sm mb-5">AI Statistics</h3>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-4 stagger-children">
+                    <div className="glass p-4 rounded-2xl text-left">
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Model</p>
-                      <h4 className="text-[11px] font-bold mt-1 text-white truncate" title={activeAnalysis.model_name || "llama-3.3-70b-versatile"}>
+                      <h4 className="text-xs font-bold mt-1.5 text-zinc-900 truncate" title={activeAnalysis.model_name || "llama-3.3-70b-versatile"}>
                         {activeAnalysis.model_name || "llama-3.3-70b-versatile"}
                       </h4>
                     </div>
-                    <div className="bg-background border border-border p-4 rounded-lg">
+                    <div className="glass p-4 rounded-2xl text-center">
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Files</p>
-                      <h4 className="text-xl font-extrabold mt-1 text-white">
-                        {activeAnalysis.files_analyzed_count || "-"}
-                      </h4>
+                      <h4 className="text-lg font-bold font-sans mt-1.5 text-zinc-900">{activeAnalysis.files_analyzed_count || "-"}</h4>
                     </div>
-                    <div className="bg-background border border-border p-4 rounded-lg">
+                    <div className="glass p-4 rounded-2xl text-center">
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Tokens</p>
-                      <h4 className="text-xl font-extrabold mt-1 text-white">
+                      <h4 className="text-lg font-bold font-sans mt-1.5 text-zinc-900">
                         {activeAnalysis.total_tokens !== undefined && activeAnalysis.total_tokens > 0 
-                          ? activeAnalysis.total_tokens 
-                          : (activeAnalysis.estimated_token_usage || "-")}
+                          ? activeAnalysis.total_tokens : (activeAnalysis.estimated_token_usage || "-")}
                       </h4>
                     </div>
-                    <div className="bg-background border border-border p-4 rounded-lg">
+                    <div className="glass p-4 rounded-2xl text-center">
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Duration</p>
-                      <h4 className="text-xl font-extrabold mt-1 text-white">
+                      <h4 className="text-lg font-bold font-sans mt-1.5 text-zinc-900">
                         {activeAnalysis.scan_duration_seconds !== undefined && activeAnalysis.scan_duration_seconds > 0
-                          ? `${activeAnalysis.scan_duration_seconds}s`
-                          : (activeAnalysis.latency_seconds > 0 ? `${activeAnalysis.latency_seconds}s` : "-")}
+                          ? `${activeAnalysis.scan_duration_seconds}s` : (activeAnalysis.latency_seconds > 0 ? `${activeAnalysis.latency_seconds}s` : "-")}
                       </h4>
                     </div>
-                    <div className="bg-background border border-border p-4 rounded-lg">
+                    <div className="glass p-4 rounded-2xl text-center">
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Cache</p>
-                      <h4 className={`text-xl font-extrabold mt-1 ${
-                        activeAnalysis.cached_results_used > 0 ? "text-accent-green" : "text-zinc-400"
-                      }`}>
+                      <h4 className={`text-lg font-bold font-sans mt-1.5 ${activeAnalysis.cached_results_used > 0 ? "text-accent-green" : "text-zinc-500"}`}>
                         {activeAnalysis.cached_results_used > 0 ? "Enabled" : "Disabled"}
                       </h4>
                     </div>
@@ -820,9 +728,9 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
               )}
 
               {/* Analysis history list */}
-              <div className="bg-surface border border-border rounded-xl p-6">
+              <div className="glass-card p-6">
                 <div className="flex justify-between items-center mb-4">
-                  <h3 className="font-bold text-white">Historical Scans</h3>
+                  <h3 className="font-bold text-zinc-900">Historical Scans</h3>
                   {analyses.length > 0 && (
                     <button
                       onClick={() => setShowDeleteAllModal(true)}
@@ -843,7 +751,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                         }`}
                       >
                         <div className="text-xs">
-                          <p className="font-bold text-white">
+                          <p className="font-bold text-zinc-900">
                             Scan on branch {activeRepo.default_branch}
                           </p>
                           <span className="text-[10px] text-zinc-500 block mt-1">
@@ -873,7 +781,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                     ))}
                   </div>
                 ) : (
-                  <p className="text-zinc-500 text-xs py-4">No scan reports recorded yet. Click Scan Repository.</p>
+                  <p className="text-zinc-700 font-semibold text-xs py-4">No scan reports recorded yet. Click "Scan Repository" to run your first scan.</p>
                 )}
               </div>
             </div>
@@ -881,81 +789,49 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
             {/* Right exports / actions */}
             <div className="space-y-4">
               {/* Export Reports */}
-              <div className="bg-surface border border-border rounded-xl p-6">
+              <div className="glass-card p-6">
                 <div>
-                  <h3 className="font-bold text-white mb-2">Export Scans Reports</h3>
-                  <p className="text-xs text-muted mb-6">Download the latest completed AI code review findings.</p>
+                  <h3 className="font-bold text-zinc-900 mb-2">Export Scan Reports</h3>
+                  <p className="text-xs text-zinc-500 mb-6">Download the latest completed AI code review findings.</p>
                 </div>
 
                 {activeAnalysis && activeAnalysis.status === "completed" ? (
                   <div className="grid grid-cols-2 gap-3">
-                    <button onClick={() => handleDownload("PDF")} className="flex items-center justify-center gap-2 border border-border hover:bg-zinc-800 py-2.5 rounded-lg text-xs text-white">
+                    <button onClick={() => handleDownload("PDF")} className="flex items-center justify-center gap-2 border border-border hover:bg-zinc-800 py-2.5 rounded-lg text-xs text-zinc-900">
                       <Download className="w-3.5 h-3.5" /> PDF
                     </button>
-                    <button onClick={() => handleDownload("Markdown")} className="flex items-center justify-center gap-2 border border-border hover:bg-zinc-800 py-2.5 rounded-lg text-xs text-white">
+                    <button onClick={() => handleDownload("Markdown")} className="flex items-center justify-center gap-2 border border-border hover:bg-zinc-800 py-2.5 rounded-lg text-xs text-zinc-900">
                       <Download className="w-3.5 h-3.5" /> Markdown
                     </button>
-                    <button onClick={() => handleDownload("JSON")} className="flex items-center justify-center gap-2 border border-border hover:bg-zinc-800 py-2.5 rounded-lg text-xs text-white">
+                    <button onClick={() => handleDownload("JSON")} className="flex items-center justify-center gap-2 border border-border hover:bg-zinc-800 py-2.5 rounded-lg text-xs text-zinc-900">
                       <Download className="w-3.5 h-3.5" /> JSON
                     </button>
-                    <button onClick={() => handleDownload("CSV")} className="flex items-center justify-center gap-2 border border-border hover:bg-zinc-800 py-2.5 rounded-lg text-xs text-white">
+                    <button onClick={() => handleDownload("CSV")} className="flex items-center justify-center gap-2 border border-border hover:bg-zinc-800 py-2.5 rounded-lg text-xs text-zinc-900">
                       <Download className="w-3.5 h-3.5" /> CSV
                     </button>
                   </div>
                 ) : (
-                  <div className="text-center text-muted text-xs p-4 bg-background/50 border border-dashed border-border rounded-lg">
-                    No completed analysis selected.
+                  <div className="text-center text-zinc-700 font-semibold text-xs p-4 bg-background/50 border border-dashed border-border rounded-lg">
+                    No completed analysis selected. Run a repository scan first.
                   </div>
                 )}
               </div>
 
-              {/* Validate Fix & Deploy */}
-              {activeAnalysis && activeAnalysis.status === "completed" && (
-                <div className="bg-surface border border-border rounded-xl p-6">
-                  <h3 className="font-bold text-white mb-2">Code Remediation</h3>
-                  <p className="text-xs text-muted mb-4">Validate your manual edits or deploy changes to GitHub.</p>
-                  <div className="space-y-3">
-                    <button
-                      onClick={handleValidateFix}
-                      disabled={validating || !openFilePath || !editorUnsaved}
-                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/30 disabled:opacity-40 text-accent-green font-semibold text-xs rounded-lg transition-all"
-                    >
-                      {validating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
-                      Validate Fix
-                    </button>
-                    <button
-                      onClick={handleDeployChanges}
-                      disabled={deployLoading}
-                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-blue/10 hover:bg-accent-blue/20 border border-accent-blue/30 disabled:opacity-40 text-accent-blue font-semibold text-xs rounded-lg transition-all"
-                    >
-                      {deployLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitBranch className="w-3.5 h-3.5" />}
-                      Deploy Changes
-                    </button>
-                    <button
-                      onClick={() => handlePushToGitHub()}
-                      disabled={pushingToGitHub || !openFilePath || !editorUnsaved}
-                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-green/15 hover:bg-accent-green/25 border border-accent-green/30 disabled:opacity-40 text-accent-green font-semibold text-xs rounded-lg transition-all"
-                    >
-                      {pushingToGitHub ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitBranch className="w-3.5 h-3.5" />}
-                      Push To GitHub
-                    </button>
-                  </div>
-                </div>
-              )}
+              {/* [REMOVED] Quick Actions — this project does not modify repositories */}
             </div>
           </div>
         )}
 
         {/* Tab: Code Explorer */}
         {activeTab === "explorer" && (
-          <div className="bg-surface border border-border rounded-xl p-4 flex gap-6 h-[720px] font-sans">
+          <div className="glass-card p-4 flex gap-6 h-[720px] font-sans">
             {/* File Tree Explorer (25% width) */}
             <div className="w-1/4 border-r border-border/60 pr-4 flex flex-col h-full overflow-y-auto">
               <div className="flex justify-between items-center mb-3">
-                <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider">File Explorer</span>
+                <span className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">File Explorer</span>
                 <button
                   onClick={fetchExplorerTree}
-                  className="text-zinc-500 hover:text-white transition-colors"
+                  className="text-zinc-500 hover:text-zinc-900 transition-colors"
                   title="Refresh Directory tree"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${explorerLoading ? "animate-spin" : ""}`} />
@@ -979,7 +855,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                   ))}
                 </div>
               ) : (
-                <div className="text-center py-20 text-[11px] text-zinc-600">
+                <div className="text-center py-20 text-xs text-zinc-700 font-semibold">
                   No files indexed or repository empty.
                 </div>
               )}
@@ -991,21 +867,14 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                 <div className="flex-1 flex flex-col h-full">
                   <div className="px-4 py-3 border-b border-border bg-zinc-900/40 flex justify-between items-center text-xs">
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="font-mono text-white font-bold truncate">{openFilePath.split("/").pop()}</span>
+                      <span className="font-mono text-zinc-900 font-bold truncate">{openFilePath.split("/").pop()}</span>
                       <span className="text-[10px] font-mono text-zinc-500 truncate">{openFilePath}</span>
-                      {editorUnsaved && (
-                        <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0" title="Unsaved changes" />
-                      )}
+                      {/* [REMOVED] Unsaved indicator — read-only explorer */}
                     </div>
                     
-                    <button
-                      onClick={() => setShowCommitModal(true)}
-                      disabled={!editorUnsaved}
-                      className="px-3.5 py-2 bg-accent-blue hover:bg-blue-600 disabled:opacity-40 disabled:hover:bg-accent-blue text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shrink-0"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                      Save File
-                    </button>
+                    <span className="px-3.5 py-2 bg-zinc-100 text-zinc-500 rounded-lg text-xs font-semibold border border-zinc-200">
+                      <Save className="w-3.5 h-3.5 inline mr-1" /> Read-Only
+                    </span>
                   </div>
                   
                   <div className="flex-1 overflow-hidden bg-black">
@@ -1022,12 +891,9 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                         openFilePath.endsWith(".css") ? "css" : "plaintext"
                       }
                       value={openFileContent}
-                      onChange={(val) => {
-                        setOpenFileContent(val || "");
-                        setEditorUnsaved((val || "") !== editorOriginalContent);
-                      }}
                       onMount={handleEditorDidMount}
                       options={{
+                        readOnly: true,
                         minimap: { enabled: false },
                         fontSize: 13,
                         lineNumbers: "on",
@@ -1037,11 +903,11 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                   </div>
                 </div>
               ) : (
-                <div className="flex-1 flex flex-col items-center justify-center text-center p-6 text-zinc-500">
-                  <Code className="w-12 h-12 text-zinc-800 mb-3" />
-                  <p className="text-xs font-semibold text-zinc-400">Inline Code Editor</p>
-                  <p className="text-[11px] text-zinc-600 mt-1.5 max-w-xs leading-relaxed">
-                    Select a source file from the directory tree to inspect, edit, or patch it directly in your browser.
+                <div className="flex-1 flex flex-col items-center justify-center text-center p-6 text-zinc-700">
+                  <Code className="w-12 h-12 text-zinc-400 mb-3" />
+                  <p className="text-xs font-bold text-zinc-800">Inline Code Editor</p>
+                  <p className="text-[11px] text-zinc-700 font-medium mt-1.5 max-w-xs leading-relaxed">
+                    Select a source file from the directory tree to inspect it directly in your browser.
                   </p>
                 </div>
               )}
@@ -1051,35 +917,35 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
         {/* Tab 2: Pull Requests */}
         {activeTab === "prs" && (
-          <div className="bg-surface border border-border rounded-xl p-6">
-            <h3 className="font-bold text-white mb-4">Open Pull Requests</h3>
+          <div className="glass-card p-6">
+            <h3 className="font-bold text-zinc-900 mb-4">Open Pull Requests</h3>
             {prs.length > 0 ? (
               <div className="divide-y divide-border/60">
                 {prs.map((pr) => (
                   <div
                     key={pr.id}
                     onClick={() => onSelectPr(pr)}
-                    className="py-4 first:pt-0 last:pb-0 flex justify-between items-center cursor-pointer hover:bg-zinc-800/20 px-3 rounded-lg transition-colors"
+                    className="py-4 first:pt-0 last:pb-0 flex justify-between items-center cursor-pointer hover:bg-zinc-100 px-3 rounded-lg transition-colors"
                   >
                     <div>
                       <div className="flex items-center gap-2">
                         <GitPullRequest className="w-4 h-4 text-accent-green" />
-                        <h4 className="font-bold text-sm text-white hover:text-accent-blue transition-colors">
+                        <h4 className="font-bold text-sm text-zinc-900 hover:text-accent-blue transition-colors">
                           #{pr.number}: {pr.title}
                         </h4>
                       </div>
-                      <p className="text-xs text-muted mt-1">Opened by @{pr.author} | {pr.head_sha.slice(0, 7)}</p>
+                      <p className="text-xs text-zinc-600 mt-1">Opened by @{pr.author} | {pr.head_sha.slice(0, 7)}</p>
                     </div>
                     <div className="flex items-center gap-4 text-xs font-semibold">
                       <span className="text-accent-green">+{pr.additions}</span>
                       <span className="text-accent-red">-{pr.deletions}</span>
-                      <ArrowLeft className="w-4 h-4 rotate-180 text-zinc-400" />
+                      <ArrowLeft className="w-4 h-4 rotate-180 text-zinc-500" />
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="text-center text-muted text-xs py-8 bg-background/50 border border-dashed border-border rounded-lg">
+              <div className="text-center text-zinc-700 font-semibold text-sm py-8 bg-background/50 border border-dashed border-border rounded-lg">
                 No active pull requests found in this repository.
               </div>
             )}
@@ -1088,14 +954,15 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
         {/* Tab 3: Security Findings */}
         {activeTab === "security" && (
-          <div className="bg-surface border border-border rounded-xl p-6">
-            <h3 className="font-bold text-white mb-4">Security Findings ({securityFindings.length})</h3>
+          <div className="glass-card p-6">            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-bold text-zinc-900">Security Findings ({securityFindings.length})</h3>
+            </div>
             {securityFindings.length > 0 ? (
               <div className="space-y-4">
                 {securityFindings.map((finding) => (
                   <div
                     key={finding.id}
-                    className="bg-background border border-border p-5 rounded-xl flex flex-col justify-between"
+                    className="glass p-5 rounded-2xl flex flex-col justify-between"
                   >
                     <div className="flex justify-between items-start mb-3">
                       <div className="flex items-start gap-3">
@@ -1103,21 +970,21 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                           <span className="text-[10px] text-accent-red font-bold uppercase px-2 py-0.5 bg-red-500/10 rounded-full border border-red-500/20">
                             {finding.severity}
                           </span>
-                          <h4 className="font-bold text-sm text-white mt-2">{finding.issue}</h4>
-                          <p className="text-xs text-zinc-400 mt-1">File: `{finding.file}` | Line {finding.line}</p>
+                          <h4 className="font-bold text-sm text-zinc-900 mt-2">{finding.issue}</h4>
+                          <p className="text-xs text-zinc-600 mt-1">File: `{finding.file}` | Line {finding.line}</p>
                         </div>
                       </div>
                     </div>
                     
-                    <div className="text-xs text-zinc-300 mt-2 space-y-2">
-                      <p><span className="font-bold text-zinc-400 block mb-0.5">Why it matters:</span> {finding.why_it_matters}</p>
-                      <p><span className="font-bold text-zinc-400 block mb-0.5">Remediation Steps:</span> {finding.suggestion}</p>
+                    <div className="text-xs text-zinc-700 mt-2 space-y-2">
+                      <p><span className="font-bold text-zinc-800 block mb-0.5">Why it matters:</span> {finding.why_it_matters}</p>
+                      <p><span className="font-bold text-zinc-800 block mb-0.5">Remediation Steps:</span> {finding.suggestion}</p>
                     </div>
 
                     {finding.after_code && (
                       <div className="mt-4">
-                        <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block mb-2">Suggested Remediation</span>
-                        <pre className="p-4 bg-zinc-900 border border-border rounded-lg text-zinc-300 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
+                        <span className="text-[10px] font-bold text-zinc-700 uppercase tracking-widest block mb-2">Suggested Remediation</span>
+                        <pre className="p-4 bg-zinc-100 border border-border rounded-lg text-zinc-700 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
                           {finding.after_code}
                         </pre>
                       </div>
@@ -1127,13 +994,13 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                       <div className="flex gap-2">
                         <button
                           onClick={() => handleJumpToLine(finding.file, finding.line)}
-                          className="px-3 py-1.5 border border-border hover:bg-zinc-800 text-zinc-300 hover:text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
+                          className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
                         >
                           <ExternalLink className="w-3 h-3" /> Open in Editor
                         </button>
                         <button
                           onClick={() => handleExplainFinding(finding.id, "security")}
-                          className="px-3 py-1.5 border border-border hover:bg-zinc-800 text-zinc-300 hover:text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
+                          className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
                         >
                           <Lightbulb className="w-3 h-3" />
                           Explain Issue
@@ -1143,9 +1010,75 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                   </div>
                 ))}
               </div>
+            ) : codeSmells.length > 0 ? (
+              <div>
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6 text-center">
+                  <p className="text-sm font-bold text-amber-800 mb-1">No security vulnerabilities detected.</p>
+                  <p className="text-xs text-amber-600">Showing code quality findings instead.</p>
+                </div>
+                <div className="space-y-4">
+                  {codeSmells.map((smell) => (
+                    <div
+                      key={smell.id}
+                      className="glass p-5 rounded-2xl flex flex-col justify-between"
+                    >
+                      <div className="flex justify-between items-start mb-3">
+                        <div className="flex items-start gap-3">
+                          <div>
+                            <span className="text-[10px] text-accent-orange font-bold uppercase px-2 py-0.5 bg-orange-50 rounded-full border border-orange-200">
+                              {smell.severity}
+                            </span>
+                            <h4 className="font-bold text-sm text-zinc-900 mt-2">{smell.issue}</h4>
+                            <p className="text-xs text-zinc-600 mt-1">File: `{smell.file}` | Line {smell.line}</p>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="text-xs text-zinc-700 mt-2 space-y-2">
+                        <p><span className="font-bold text-zinc-800 block mb-0.5">Explanation:</span> {smell.why_it_matters}</p>
+                        <p><span className="font-bold text-zinc-800 block mb-0.5">Refactoring suggestion:</span> {smell.suggestion}</p>
+                      </div>
+
+                      {smell.before_code && (
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+                          <div>
+                            <span className="text-[10px] font-bold text-accent-red uppercase tracking-widest block mb-2">Before (Smell):</span>
+                            <pre className="p-3 bg-red-50 border border-red-200 rounded-lg text-zinc-700 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
+                              {smell.before_code}
+                            </pre>
+                          </div>
+                          <div>
+                            <span className="text-[10px] font-bold text-accent-green uppercase tracking-widest block mb-2">Suggested Code:</span>
+                            <pre className="p-3 bg-green-50 border border-green-200 rounded-lg text-zinc-700 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
+                              {smell.after_code}
+                            </pre>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="mt-4 pt-4 border-t border-border/40 flex justify-between items-center font-sans">
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleJumpToLine(smell.file, smell.line)}
+                            className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
+                          >
+                            <ExternalLink className="w-3 h-3" /> Open in Editor
+                          </button>
+                          <button
+                            onClick={() => handleExplainFinding(smell.id, "code_smell")}
+                            className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
+                          >
+                            <Lightbulb className="w-3 h-3" /> Explain Issue
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             ) : (
-              <div className="text-center text-muted text-xs py-8 bg-background/50 border border-dashed border-border rounded-lg">
-                No security findings available. Perform scan first.
+              <div className="text-center text-zinc-700 font-semibold text-sm py-8 bg-background/50 border border-dashed border-border rounded-lg">
+                No analysis results available. Run a repository scan first.
               </div>
             )}
           </div>
@@ -1153,43 +1086,45 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
         {/* Tab 4: Code Quality */}
         {activeTab === "quality" && (
-          <div className="bg-surface border border-border rounded-xl p-6">
-            <h3 className="font-bold text-white mb-4">Code Smells & Maintainability ({codeSmells.length})</h3>
+          <div className="glass-card p-6">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-bold text-zinc-900">Code Smells & Maintainability ({codeSmells.length})</h3>
+            </div>
             {codeSmells.length > 0 ? (
               <div className="space-y-4">
                 {codeSmells.map((smell) => (
                   <div
                     key={smell.id}
-                    className="bg-background border border-border p-5 rounded-xl flex flex-col justify-between"
+                    className="glass p-5 rounded-2xl flex flex-col justify-between"
                   >
                     <div className="flex justify-between items-start mb-3">
                       <div className="flex items-start gap-3">
                         <div>
-                          <span className="text-[10px] text-accent-orange font-bold uppercase px-2 py-0.5 bg-orange-500/10 rounded-full border border-orange-500/20">
+                          <span className="text-[10px] text-accent-orange font-bold uppercase px-2 py-0.5 bg-orange-50 rounded-full border border-orange-200">
                             {smell.severity}
                           </span>
-                          <h4 className="font-bold text-sm text-white mt-2">{smell.issue}</h4>
-                          <p className="text-xs text-zinc-400 mt-1">File: `{smell.file}` | Line {smell.line}</p>
+                          <h4 className="font-bold text-sm text-zinc-900 mt-2">{smell.issue}</h4>
+                          <p className="text-xs text-zinc-600 mt-1">File: `{smell.file}` | Line {smell.line}</p>
                         </div>
                       </div>
                     </div>
                     
-                    <div className="text-xs text-zinc-300 mt-2 space-y-2">
-                      <p><span className="font-bold text-zinc-400 block mb-0.5">Explanation:</span> {smell.why_it_matters}</p>
-                      <p><span className="font-bold text-zinc-400 block mb-0.5">Refactoring suggestion:</span> {smell.suggestion}</p>
+                    <div className="text-xs text-zinc-700 mt-2 space-y-2">
+                      <p><span className="font-bold text-zinc-800 block mb-0.5">Explanation:</span> {smell.why_it_matters}</p>
+                      <p><span className="font-bold text-zinc-800 block mb-0.5">Refactoring suggestion:</span> {smell.suggestion}</p>
                     </div>
 
                     {smell.before_code && (
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
                         <div>
                           <span className="text-[10px] font-bold text-accent-red uppercase tracking-widest block mb-2">Before (Smell):</span>
-                          <pre className="p-3 bg-red-950/20 border border-red-900/30 rounded-lg text-zinc-300 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
+                          <pre className="p-3 bg-red-50 border border-red-200 rounded-lg text-zinc-700 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
                             {smell.before_code}
                           </pre>
                         </div>
                         <div>
                           <span className="text-[10px] font-bold text-accent-green uppercase tracking-widest block mb-2">Suggested Code:</span>
-                          <pre className="p-3 bg-green-950/20 border border-green-900/30 rounded-lg text-zinc-300 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
+                          <pre className="p-3 bg-green-50 border border-green-200 rounded-lg text-zinc-700 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
                             {smell.after_code}
                           </pre>
                         </div>
@@ -1200,13 +1135,13 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                       <div className="flex gap-2">
                         <button
                           onClick={() => handleJumpToLine(smell.file, smell.line)}
-                          className="px-3 py-1.5 border border-border hover:bg-zinc-800 text-zinc-300 hover:text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
+                          className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
                         >
                           <ExternalLink className="w-3 h-3" /> Open in Editor
                         </button>
                         <button
                           onClick={() => handleExplainFinding(smell.id, "code_smell")}
-                          className="px-3 py-1.5 border border-border hover:bg-zinc-800 text-zinc-300 hover:text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
+                          className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5"
                         >
                           <Lightbulb className="w-3 h-3" /> Explain Issue
                         </button>
@@ -1216,8 +1151,8 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                 ))}
               </div>
             ) : (
-              <div className="text-center text-muted text-xs py-8 bg-background/50 border border-dashed border-border rounded-lg">
-                No code quality smells logged. Perform scan first.
+              <div className="text-center text-zinc-700 font-semibold text-sm py-8 bg-background/50 border border-dashed border-border rounded-lg">
+                No analysis results available. Run a repository scan first.
               </div>
             )}
           </div>
@@ -1225,15 +1160,13 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
         {/* Tab 5: Tests */}
         {activeTab === "tests" && (
-          <div className="bg-surface border border-border rounded-xl p-6">
-            <h3 className="font-bold text-white mb-4">Generated QA Test Templates</h3>
+          <div className="glass-card p-6">
+            <h3 className="font-bold text-zinc-900 mb-4">Generated QA Test Templates</h3>
             {testSuggestions ? (
-              <pre className="p-5 bg-background border border-border rounded-xl text-zinc-300 text-xs overflow-x-auto whitespace-pre-wrap font-mono">
-                {testSuggestions}
-              </pre>
+              <Markdown content={testSuggestions} className="text-xs" />
             ) : (
-              <div className="text-center text-muted text-xs py-8 bg-background/50 border border-dashed border-border rounded-lg">
-                No test suggestions generated. Perform scan first.
+              <div className="text-center text-zinc-700 font-semibold text-sm py-8 bg-background/50 border border-dashed border-border rounded-lg">
+                No analysis results available. Run a repository scan first.
               </div>
             )}
           </div>
@@ -1241,15 +1174,13 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
         {/* Tab 6: Insights */}
         {activeTab === "insights" && (
-          <div className="bg-surface border border-border rounded-xl p-6">
-            <h3 className="font-bold text-white mb-4">Qualitative Engineering Report</h3>
+          <div className="glass-card p-6">
+            <h3 className="font-bold text-zinc-900 mb-4">Qualitative Engineering Report</h3>
             {activeAnalysis?.insights ? (
-              <div className="prose prose-invert max-w-none text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed">
-                {activeAnalysis.insights}
-              </div>
+              <Markdown content={activeAnalysis.insights} />
             ) : (
-              <div className="text-center text-muted text-xs py-8 bg-background/50 border border-dashed border-border rounded-lg">
-                No engineering insights loaded. Perform scan first.
+              <div className="text-center text-zinc-700 font-semibold text-sm py-8 bg-background/50 border border-dashed border-border rounded-lg">
+                No analysis results available. Run a repository scan first.
               </div>
             )}
           </div>
@@ -1258,59 +1189,42 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
       {/* Explain Finding Modal */}
       {explainFinding && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center z-[60] p-4 animate-in fade-in duration-150">
-          <div className="bg-surface border border-border w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[80vh] overflow-hidden">
-            <div className="px-6 py-4 border-b border-border flex justify-between items-center bg-zinc-900/50">
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center z-[60] p-4 animate-fade-in">
+          <div className="glass-card w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[80vh] overflow-hidden">
+            <div className="px-6 py-4 border-b border-border flex justify-between items-center bg-zinc-50">
               <div>
                 <span className="text-[10px] font-bold uppercase tracking-wider text-accent-blue bg-accent-blue/10 px-2 py-0.5 rounded border border-accent-blue/20">
                   AI Deep Insights
                 </span>
-                <h3 className="text-md font-bold text-white mt-1.5">
+                <h3 className="text-md font-bold text-zinc-900 mt-1.5">
                   Vulnerability Root-Cause Analysis
                 </h3>
               </div>
               <button
                 onClick={() => setExplainFinding(null)}
-                className="text-zinc-400 hover:text-white p-1 rounded-lg hover:bg-zinc-800 transition-colors"
+                className="text-zinc-500 hover:text-zinc-900 p-1 rounded-lg hover:bg-zinc-100 transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
             
-            <div className="flex-1 overflow-y-auto p-6 text-xs text-zinc-300 leading-relaxed space-y-4 font-sans">
+            <div className="flex-1 overflow-y-auto p-6 text-xs text-zinc-700 leading-relaxed space-y-4 font-sans">
               {explainLoading ? (
                 <div className="flex flex-col items-center justify-center py-20 gap-3">
                   <div className="w-10 h-10 border-4 border-accent-blue/20 border-t-accent-blue rounded-full animate-spin" />
-                  <span className="text-xs text-zinc-500">Generating markdown explanation from Groq...</span>
+                  <span className="text-xs text-zinc-700">Generating markdown explanation from Groq...</span>
                 </div>
               ) : explainResult ? (
-                <div className="prose prose-invert prose-xs max-w-none space-y-4">
-                  {explainResult.split("\n").map((line, idx) => {
-                    if (line.startsWith("# ")) {
-                      return <h2 key={idx} className="text-sm font-bold text-white border-b border-border/40 pb-1 mt-4">{line.replace("#", "").trim()}</h2>;
-                    } else if (line.startsWith("## ")) {
-                      return <h3 key={idx} className="text-xs font-bold text-white mt-3">{line.replace("##", "").trim()}</h3>;
-                    } else if (line.startsWith("### ")) {
-                      return <h4 key={idx} className="text-[11px] font-bold text-zinc-200 mt-2">{line.replace("###", "").trim()}</h4>;
-                    } else if (line.startsWith("* ") || line.startsWith("- ")) {
-                      return <li key={idx} className="ml-4 list-disc">{line.replace(/^[\s*-]+/, "").trim()}</li>;
-                    } else if (line.trim().startsWith("```")) {
-                      return null;
-                    } else if (line.trim()) {
-                      return <p key={idx} className="text-zinc-300">{line}</p>;
-                    }
-                    return <div key={idx} className="h-2" />;
-                  })}
-                </div>
+                <Markdown content={explainResult} />
               ) : (
                 <p>No explanation generated.</p>
               )}
             </div>
             
-            <div className="px-6 py-3 border-t border-border bg-zinc-900/30 flex justify-end">
+            <div className="px-6 py-3 border-t border-border bg-zinc-50 flex justify-end">
               <button
                 onClick={() => setExplainFinding(null)}
-                className="px-4 py-2 border border-border text-xs rounded-lg hover:bg-zinc-800 text-white font-semibold transition-colors"
+                className="px-4 py-2 border border-border text-xs rounded-lg hover:bg-zinc-100 text-zinc-700 font-semibold transition-colors"
               >
                 Close Explanation
               </button>
@@ -1319,76 +1233,21 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
         </div>
       )}
 
-      {/* Direct Commit Save Modal */}
-      {showCommitModal && (
-        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
-          <div className="bg-surface border border-border w-full max-w-md rounded-xl shadow-2xl flex flex-col overflow-hidden font-sans">
-            <div className="px-5 py-4 border-b border-border bg-zinc-900/50 flex justify-between items-center">
-              <span className="text-xs font-bold text-white uppercase tracking-wider">Commit File Updates</span>
-              <button
-                onClick={() => setShowCommitModal(false)}
-                className="text-zinc-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="p-5 space-y-4">
-              <p className="text-xs text-zinc-400">
-                You are about to commit your changes directly to the <strong>{activeRepo?.default_branch}</strong> branch of the GitHub repository. This will automatically queue a background re-scan.
-              </p>
-              
-              <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Commit Message</label>
-                <input
-                  type="text"
-                  value={commitMsg}
-                  onChange={(e) => setCommitMsg(e.target.value)}
-                  placeholder="Direct code update from browser"
-                  className="w-full bg-background border border-border rounded-lg text-white text-xs px-3 py-2.5 focus:outline-none focus:border-accent-blue"
-                />
-              </div>
-            </div>
-            
-            <div className="px-5 py-3 border-t border-border bg-zinc-900/30 flex justify-end gap-3">
-              <button
-                onClick={() => setShowCommitModal(false)}
-                disabled={saveLoading}
-                className="px-4 py-2 border border-border text-xs rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white font-semibold transition-colors disabled:opacity-40"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveFile}
-                disabled={saveLoading || !commitMsg.trim()}
-                className="px-4 py-2 bg-accent-blue hover:bg-blue-600 disabled:opacity-40 text-white text-xs rounded-lg font-semibold transition-colors flex items-center gap-1.5"
-              >
-                {saveLoading ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Committing...
-                  </>
-                ) : (
-                  <>
-                    <Save className="w-3.5 h-3.5" />
-                    Confirm Commit
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* [REMOVED] Fix Result Modal — Generate Fix button removed per spec */}
+      {/* [REMOVED] Rescan Verification Modal — this project does not modify repositories */}
+
+      {/* [REMOVED] Direct Commit Save Modal — this project does not modify repositories */}
 
       {/* Delete Scan Confirmation Modal */}
       {scanToDelete && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
-          <div className="bg-surface border border-border w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
-            <h3 className="text-md font-bold text-white font-sans">Delete Scan?</h3>
-            <p className="text-xs text-muted leading-relaxed font-sans">This action cannot be undone.</p>
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in">
+          <div className="glass-card w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
+            <h3 className="text-md font-bold text-zinc-900 font-sans">Delete Scan?</h3>
+            <p className="text-xs text-zinc-600 leading-relaxed font-sans">This action cannot be undone.</p>
             <div className="flex gap-3 pt-2 font-sans">
               <button
                 onClick={() => setScanToDelete(null)}
-                className="flex-1 border border-border hover:bg-zinc-800 text-zinc-400 hover:text-white font-semibold text-xs py-2.5 rounded-lg transition-colors"
+                className="flex-1 border border-border hover:bg-zinc-100 text-zinc-600 hover:text-zinc-900 font-semibold text-xs py-2.5 rounded-lg transition-colors"
               >
                 Cancel
               </button>
@@ -1413,14 +1272,14 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
       {/* Delete All History Confirmation Modal */}
       {showDeleteAllModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
-          <div className="bg-surface border border-border w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
-            <h3 className="text-md font-bold text-white font-sans">Delete ALL scans?</h3>
-            <p className="text-xs text-muted leading-relaxed font-sans">This action cannot be undone.</p>
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in">
+          <div className="glass-card w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
+            <h3 className="text-md font-bold text-zinc-900 font-sans">Delete ALL scans?</h3>
+            <p className="text-xs text-zinc-600 leading-relaxed font-sans">This action cannot be undone.</p>
             <div className="flex gap-3 pt-2 font-sans">
               <button
                 onClick={() => setShowDeleteAllModal(false)}
-                className="flex-1 border border-border hover:bg-zinc-800 text-zinc-400 hover:text-white font-semibold text-xs py-2.5 rounded-lg transition-colors"
+                className="flex-1 border border-border hover:bg-zinc-100 text-zinc-600 hover:text-zinc-900 font-semibold text-xs py-2.5 rounded-lg transition-colors"
               >
                 Cancel
               </button>
@@ -1444,17 +1303,17 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
       )}
       {/* Disconnect Confirmation Modal */}
       {showDisconnectModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200 font-sans">
-          <div className="bg-surface border border-border w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
-            <h3 className="text-md font-bold text-white">Disconnect Repository?</h3>
-            <p className="text-xs text-muted leading-relaxed">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in font-sans">
+          <div className="glass-card w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
+            <h3 className="text-md font-bold text-zinc-900">Disconnect Repository?</h3>
+            <p className="text-xs text-zinc-600 leading-relaxed">
               Disconnecting will hide this repository from your active workspace but keep its history intact. You can reconnect it at any time.
             </p>
             <div className="flex gap-3 pt-2">
               <button
                 onClick={() => setShowDisconnectModal(false)}
                 disabled={actionLoading}
-                className="flex-1 border border-border hover:bg-zinc-800 text-zinc-400 hover:text-white font-semibold text-xs py-2.5 rounded-lg transition-colors"
+                className="flex-1 border border-border hover:bg-zinc-100 text-zinc-600 hover:text-zinc-900 font-semibold text-xs py-2.5 rounded-lg transition-colors"
               >
                 Cancel
               </button>
@@ -1473,17 +1332,17 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
       {/* Delete Repository Confirmation Modal */}
       {showDeleteRepoModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200 font-sans">
-          <div className="bg-surface border border-border w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in font-sans">
+          <div className="glass-card w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
             <h3 className="text-md font-bold text-accent-red">Hard Delete Repository?</h3>
-            <p className="text-xs text-muted leading-relaxed">
+            <p className="text-xs text-zinc-600 leading-relaxed">
               This will permanently delete the repository registration, all scan history, reports, code findings, and patches from the system. <strong>This action cannot be undone.</strong>
             </p>
             <div className="flex gap-3 pt-2">
               <button
                 onClick={() => setShowDeleteRepoModal(false)}
                 disabled={actionLoading}
-                className="flex-1 border border-border hover:bg-zinc-800 text-zinc-400 hover:text-white font-semibold text-xs py-2.5 rounded-lg transition-colors"
+                className="flex-1 border border-border hover:bg-zinc-100 text-zinc-600 hover:text-zinc-900 font-semibold text-xs py-2.5 rounded-lg transition-colors"
               >
                 Cancel
               </button>
@@ -1500,174 +1359,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
         </div>
       )}
 
-      {/* Validate Fix Modal */}
-      {showValidateModal && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center z-[60] p-4 animate-in fade-in duration-150">
-          <div className="bg-surface border border-border w-full max-w-lg rounded-2xl shadow-2xl flex flex-col max-h-[70vh] overflow-hidden">
-            <div className="px-6 py-4 border-b border-border flex justify-between items-center bg-zinc-900/50">
-              <div>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-accent-green bg-accent-green/10 px-2 py-0.5 rounded border border-accent-green/20">
-                  Validate Fix
-                </span>
-                <h3 className="text-md font-bold text-white mt-1.5">Re-Scan Validation Results</h3>
-              </div>
-              <button
-                onClick={() => { setShowValidateModal(false); setValidateResult(null); }}
-                className="text-zinc-400 hover:text-white p-1 rounded-lg hover:bg-zinc-800 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            
-            <div className="flex-1 overflow-y-auto p-6 text-xs text-zinc-300 space-y-4">
-              {validating ? (
-                <div className="flex flex-col items-center justify-center py-16 gap-3">
-                  <div className="w-10 h-10 border-4 border-accent-green/20 border-t-accent-green rounded-full animate-spin" />
-                  <span className="text-xs text-zinc-500">Re-scanning edited file...</span>
-                </div>
-              ) : validateResult ? (
-                <div className="space-y-6">
-                  <div className={`p-4 rounded-xl border text-center ${
-                    validateResult.status === "fixed" ? "bg-green-500/10 border-green-500/20" :
-                    validateResult.status === "partially_fixed" ? "bg-amber-500/10 border-amber-500/20" :
-                    validateResult.status === "not_fixed" ? "bg-red-500/10 border-red-500/20" :
-                    "bg-zinc-800/30 border-zinc-700"
-                  }`}>
-                    <span className={`text-2xl font-extrabold ${
-                      validateResult.status === "fixed" ? "text-accent-green" :
-                      validateResult.status === "partially_fixed" ? "text-amber-400" :
-                      "text-accent-red"
-                    }`}>
-                      {validateResult.status === "fixed" ? "Fixed" :
-                       validateResult.status === "partially_fixed" ? "Partially Fixed" :
-                       validateResult.status === "not_fixed" ? "Not Fixed" :
-                       validateResult.status}
-                    </span>
-                    <p className="text-xs mt-2 text-zinc-400">{validateResult.details}</p>
-                  </div>
-
-                  {validateResult.remaining_issues && validateResult.remaining_issues.length > 0 && (
-                    <div>
-                      <h4 className="font-bold text-white mb-3 text-sm">Remaining Issues ({validateResult.remaining_issues.length})</h4>
-                      <div className="space-y-3">
-                        {validateResult.remaining_issues.map((issue: any, idx: number) => (
-                          <div key={idx} className="bg-zinc-900/60 border border-zinc-800 p-3 rounded-lg">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                                issue.severity === "Critical" || issue.severity === "High"
-                                  ? "bg-red-500/10 text-red-400" : "bg-amber-500/10 text-amber-400"
-                              }`}>{issue.severity}</span>
-                              <span className="font-semibold text-white text-xs">{issue.issue}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p className="text-center text-zinc-500 py-8">No validation data available.</p>
-              )}
-            </div>
-            
-            <div className="px-6 py-3 border-t border-border bg-zinc-900/30 flex justify-end">
-              <button
-                onClick={() => { setShowValidateModal(false); setValidateResult(null); }}
-                className="px-4 py-2 border border-border text-xs rounded-lg hover:bg-zinc-800 text-white font-semibold transition-colors"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Deploy Changes Modal */}
-      {showDeployModal && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center z-[60] p-4 animate-in fade-in duration-150">
-          <div className="bg-surface border border-border w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
-            <div className="px-6 py-4 border-b border-border flex justify-between items-center bg-zinc-900/50">
-              <div>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-accent-blue bg-accent-blue/10 px-2 py-0.5 rounded border border-accent-blue/20">
-                  Deploy Changes
-                </span>
-                <h3 className="text-md font-bold text-white mt-1.5">AI-Generated Deployment Instructions</h3>
-              </div>
-              <button
-                onClick={() => { setShowDeployModal(false); setDeployInstructions(null); }}
-                className="text-zinc-400 hover:text-white p-1 rounded-lg hover:bg-zinc-800 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            
-            <div className="flex-1 overflow-y-auto p-6 text-xs text-zinc-300 space-y-6">
-              {deployLoading ? (
-                <div className="flex flex-col items-center justify-center py-16 gap-3">
-                  <div className="w-10 h-10 border-4 border-accent-blue/20 border-t-accent-blue rounded-full animate-spin" />
-                  <span className="text-xs text-zinc-500">Generating deployment instructions...</span>
-                </div>
-              ) : deployInstructions ? (
-                <div className="space-y-6">
-                  <div>
-                    <h4 className="font-bold text-white mb-3 flex items-center gap-2">
-                      <GitBranch className="w-4 h-4 text-accent-blue" />
-                      Steps to Deploy
-                    </h4>
-                    <div className="space-y-2">
-                      {deployInstructions.steps.map((step: string, idx: number) => (
-                        <div key={idx} className="flex items-start gap-3 p-3 bg-zinc-900/60 border border-zinc-800 rounded-lg">
-                          <span className="w-5 h-5 rounded-full bg-accent-blue/20 text-accent-blue flex items-center justify-center text-[10px] font-bold shrink-0">
-                            {idx + 1}
-                          </span>
-                          <code className="font-mono text-xs text-zinc-200 break-all">{step}</code>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {deployInstructions.commit_suggestion && (
-                    <div className="bg-zinc-900/40 border border-zinc-800 rounded-xl p-4">
-                      <h4 className="font-bold text-white mb-2 text-sm">Commit Message Suggestion</h4>
-                      <code className="block p-3 bg-black/50 border border-zinc-800 rounded-lg font-mono text-xs text-accent-green break-all">
-                        {deployInstructions.commit_suggestion}
-                      </code>
-                    </div>
-                  )}
-
-                  {deployInstructions.pr_title_suggestion && (
-                    <div className="bg-zinc-900/40 border border-zinc-800 rounded-xl p-4">
-                      <h4 className="font-bold text-white mb-2 text-sm">PR Title Suggestion</h4>
-                      <p className="text-xs text-zinc-300">{deployInstructions.pr_title_suggestion}</p>
-                    </div>
-                  )}
-
-                  {deployInstructions.pr_description_suggestion && (
-                    <div className="bg-zinc-900/40 border border-zinc-800 rounded-xl p-4">
-                      <h4 className="font-bold text-white mb-2 text-sm">PR Description Suggestion</h4>
-                      <pre className="whitespace-pre-wrap text-xs text-zinc-300 font-sans leading-relaxed">
-                        {deployInstructions.pr_description_suggestion}
-                      </pre>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p className="text-center text-zinc-500 py-8">No instructions available.</p>
-              )}
-            </div>
-            
-            <div className="px-6 py-3 border-t border-border bg-zinc-900/30 flex justify-between items-center">
-              <p className="text-[10px] text-zinc-500">Never modify files automatically. Review before deploying.</p>
-              <button
-                onClick={() => { setShowDeployModal(false); setDeployInstructions(null); }}
-                className="px-4 py-2 border border-border text-xs rounded-lg hover:bg-zinc-800 text-white font-semibold transition-colors"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* [REMOVED] Fix All Result Modal — this project does not modify repositories */}
     </div>
   );
 };

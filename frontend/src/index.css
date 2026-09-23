@@ -3,19 +3,240 @@
 @tailwind utilities;
 
 @layer base {
+  * {
+    @apply border-border;
+  }
+
   body {
-    @apply bg-background text-white antialiased font-sans selection:bg-accent-blue selection:text-white;
+    @apply bg-background text-zinc-900 antialiased font-sans selection:bg-accent-blue/20 selection:text-accent-blue;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  /* All headings - sans-serif only (no decorative serif) */
+  h1, h2, h3, h4 {
+    @apply font-sans tracking-tight font-bold text-zinc-900;
+  }
+
+  /* Improved heading hierarchy */
+  h1 { @apply text-4xl md:text-5xl; }
+  h2 { @apply text-3xl; }
+  h3 { @apply text-xl; }
+  h4 { @apply text-lg; }
+
+  /* Body text base size + darker for readability */
+  p { @apply text-base text-zinc-800; }
+
+  /* Stronger base text weight & color across the app (readability pass) */
+  main, main span, main p, main li, main td, main th, main label {
+    @apply text-zinc-800;
+  }
+
+  /* Interactive element transitions with 300ms */
+  a, button, select, input, textarea {
+    @apply transition-all duration-300 ease-out;
+  }
+
+  /* Focus ring */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-accent-blue/30 ring-offset-2 ring-offset-white;
   }
 }
 
-/* Custom scrollbar */
+/* ── Custom Scrollbar ── */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 4px;
+  height: 4px;
 }
 ::-webkit-scrollbar-track {
-  @apply bg-background;
+  @apply bg-transparent;
 }
 ::-webkit-scrollbar-thumb {
-  @apply bg-border rounded-full hover:bg-zinc-700;
+  @apply bg-zinc-200 rounded-full hover:bg-zinc-300 transition-colors;
+}
+
+/* ── Glass Card Components ── */
+@layer components {
+  .glass {
+    @apply bg-white border border-zinc-200/80 shadow-glass;
+  }
+
+  .glass-hover {
+    @apply glass hover:bg-zinc-50 hover:shadow-glass-lg hover:border-zinc-300 transition-all duration-300;
+  }
+
+  .glass-card {
+    @apply bg-white backdrop-blur-glass border border-zinc-200/60 shadow-glass rounded-3xl;
+  }
+
+  .glass-card-hover {
+    @apply glass-card hover:bg-zinc-50 hover:shadow-card-hover hover:border-zinc-300 hover:-translate-y-0.5 transition-all duration-300;
+  }
+
+  .glass-hero {
+    @apply bg-gradient-to-br from-white to-zinc-50 backdrop-blur-glass border border-zinc-200/50 shadow-glass-lg rounded-4xl;
+  }
+
+  .glass-card-glow {
+    @apply glass-card;
+  }
+
+  .glass-card-glow-purple {
+    @apply glass-card;
+  }
+
+  .glass-card-glow-cyan {
+    @apply glass-card;
+  }
+
+  .glass-card-glow-green {
+    @apply glass-card;
+  }
+
+  /* Input styling */
+  .input-glass {
+    @apply w-full bg-white/80 backdrop-blur-glass border border-zinc-300 rounded-2xl text-zinc-900 font-medium
+           placeholder-zinc-500 focus:outline-none focus:border-accent-blue/50 focus:ring-1 focus:ring-accent-blue/20
+           text-sm px-4 py-3;
+  }
+
+  .select-glass {
+    @apply w-full bg-white/80 backdrop-blur-glass border border-zinc-300 rounded-2xl text-zinc-900 font-semibold text-xs
+           px-4 py-3 focus:outline-none focus:border-accent-blue/50 focus:ring-1 focus:ring-accent-blue/20;
+  }
+
+  /* Button variants with hover effects: glow, lift, scale 1.02, 300ms */
+  .btn-primary {
+    @apply bg-accent-gradient font-semibold text-xs
+           px-5 py-3 rounded-2xl shadow-glow-blue
+           hover:opacity-90 hover:shadow-lg hover:-translate-y-0.5 hover:scale-[1.02]
+           active:scale-[0.98] active:opacity-80
+           transition-all duration-300
+           disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100 disabled:hover:-translate-y-0;
+    color: white !important;
+  }
+
+  .btn-secondary {
+    @apply bg-white border border-zinc-300 hover:border-zinc-400
+           hover:bg-zinc-50 text-zinc-900 hover:text-zinc-950 font-bold text-xs
+           px-5 py-3 rounded-2xl
+           hover:-translate-y-0.5 hover:scale-[1.02] hover:shadow-md
+           active:scale-[0.98]
+           transition-all duration-300 disabled:opacity-40;
+  }
+
+  .btn-danger {
+    @apply border border-red-200/60
+           font-semibold text-xs px-5 py-3 rounded-2xl
+           hover:-translate-y-0.5 hover:scale-[1.02]
+           transition-all duration-300;
+    background-color: #EF4444 !important;
+    color: white !important;
+    border-color: #EF4444 !important;
+  }
+  .btn-danger:hover {
+    background-color: #DC2626 !important;
+  }
+
+  .btn-ghost {
+    @apply bg-transparent hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 text-xs font-bold
+           px-3 py-2 rounded-2xl transition-all duration-200;
+  }
+
+  /* Badge variants */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-full border;
+  }
+  .badge-critical { @apply badge bg-red-100 text-red-700 border-red-300; }
+  .badge-high { @apply badge bg-orange-100 text-orange-700 border-orange-300; }
+  .badge-medium { @apply badge bg-yellow-100 text-yellow-800 border-yellow-300; }
+  .badge-low { @apply badge bg-blue-100 text-blue-700 border-blue-300; }
+  .badge-info { @apply badge bg-zinc-100 text-zinc-700 border-zinc-300; }
+
+  /* Tab navigation */
+  .tab {
+    @apply pb-3 text-xs font-bold uppercase tracking-wider border-b-2 transition-all cursor-pointer;
+  }
+  .tab-active {
+    @apply border-accent-blue text-accent-blue;
+  }
+  .tab-inactive {
+    @apply border-transparent text-zinc-500 hover:text-zinc-900 hover:border-zinc-400;
+  }
+
+  /* Status indicators */
+  .status-dot {
+    @apply w-2 h-2 rounded-full;
+  }
+  .status-dot-success { @apply bg-accent-green; }
+  .status-dot-warning { @apply bg-accent-orange; }
+  .status-dot-error { @apply bg-accent-red; }
+  .status-dot-active { @apply animate-pulse bg-accent-blue; }
+
+  /* KPI Metric Card */
+  .metric-card {
+    @apply glass-card p-6 flex items-center gap-4;
+  }
+
+  .metric-value {
+    @apply text-2xl font-bold font-sans text-zinc-900;
+  }
+
+  .metric-label {
+    @apply text-xs font-bold text-zinc-600 uppercase tracking-wider;
+  }
+}
+
+/* ── Shimmer loading ── */
+.shimmer-bg {
+  background: linear-gradient(90deg,
+    rgba(0,0,0,0.02) 25%,
+    rgba(0,0,0,0.04) 50%,
+    rgba(0,0,0,0.02) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* ── Monaco editor overrides ── */
+.monaco-editor .margin,
+.monaco-editor .monaco-editor-background {
+  background-color: #F8F9FB !important;
+}
+.monaco-editor .minimap-decorations-layer {
+  opacity: 0.5;
+}
+
+/* ── Diff viewer premium styling ── */
+.diff-added {
+  @apply bg-accent-green/10 border-l-2 border-accent-green;
+}
+.diff-removed {
+  @apply bg-accent-red/10 border-l-2 border-accent-red;
+}
+
+/* ── Animations for staggered children ── */
+.stagger-children > * {
+  animation: fadeIn 0.5s ease-out forwards;
+  opacity: 0;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0ms; }
+.stagger-children > *:nth-child(2) { animation-delay: 80ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 160ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 240ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 320ms; }
+.stagger-children > *:nth-child(6) { animation-delay: 400ms; }
+
+/* ── Progress bar gradient ── */
+.progress-bar {
+  @apply h-2 rounded-full bg-zinc-200 overflow-hidden;
+}
+.progress-bar-fill {
+  @apply h-full rounded-full bg-accent-gradient transition-all duration-500 ease-out;
+}
+.progress-bar-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+  animation: shimmer 2s infinite;
 }

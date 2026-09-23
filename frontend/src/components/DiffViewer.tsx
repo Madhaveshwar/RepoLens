@@ -26,8 +26,8 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ originalCode, fixedCode,
 
       let leftBg = "bg-transparent";
       let rightBg = "bg-transparent";
-      let leftColor = "text-zinc-300";
-      let rightColor = "text-zinc-300";
+      let leftColor = "text-zinc-500";
+      let rightColor = "text-zinc-500";
 
       if (isDifferent) {
         if (hasOrig && hasFixed) {
@@ -51,7 +51,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ originalCode, fixedCode,
         <div key={i} className="flex border-b border-border/10 hover:bg-zinc-800/10 text-xs font-mono select-text">
           {/* Left Column: Original */}
           <div className={`w-1/2 flex border-r border-border/30 ${leftBg} py-0.5 px-2 min-w-0`}>
-            <span className="w-8 text-right pr-2 text-zinc-600 select-none border-r border-border/10 mr-2 shrink-0">
+            <span className="w-8 text-right pr-2 text-zinc-500 select-none border-r border-border/10 mr-2 shrink-0">
               {hasOrig ? i + 1 : ""}
             </span>
             <span className={`whitespace-pre overflow-x-auto min-w-0 ${leftColor}`}>
@@ -61,7 +61,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ originalCode, fixedCode,
 
           {/* Right Column: Fixed */}
           <div className={`w-1/2 flex ${rightBg} py-0.5 px-2 min-w-0`}>
-            <span className="w-8 text-right pr-2 text-zinc-600 select-none border-r border-border/10 mr-2 shrink-0">
+            <span className="w-8 text-right pr-2 text-zinc-500 select-none border-r border-border/10 mr-2 shrink-0">
               {hasFixed ? i + 1 : ""}
             </span>
             <span className={`whitespace-pre overflow-x-auto min-w-0 ${rightColor}`}>
@@ -77,7 +77,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ originalCode, fixedCode,
   return (
     <div className="border border-border rounded-xl bg-zinc-950 overflow-hidden shadow-2xl flex flex-col h-full">
       {/* Diff Header */}
-      <div className="bg-surface px-4 py-2.5 border-b border-border flex justify-between items-center text-xs text-zinc-400 font-semibold select-none">
+      <div className="bg-surface px-4 py-2.5 border-b border-border flex justify-between items-center text-xs text-zinc-600 font-semibold select-none">
         <span className="flex items-center gap-1.5 truncate max-w-xs">
           ðŸ“„ {filename || "Code Diff Comparison"}
         </span>

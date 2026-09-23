@@ -6,9 +6,9 @@ from fastapi import Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from backend.app.config import settings
-from backend.app.database.database import get_async_db
-from backend.app.models.models import User
+from app.config import settings
+from app.database.database import get_async_db
+from app.models.models import User
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login", auto_error=False)

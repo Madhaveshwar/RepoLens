@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -5,12 +6,12 @@ from fastapi import Request, Response
 import time
 import json
 from sqlalchemy import inspect
-from backend.app.config import settings
-from backend.app.database.database import Base, sync_engine
-from backend.app.routers import (
+from app.config import settings
+from app.database.database import Base, sync_engine
+from app.routers import (
     auth, users, repositories, pull_requests,
     analysis, security, code_quality, tests, reports, health, explorer,
-    webhooks, audit_logs
+    webhooks, audit_logs, chat, dead_letter_queue
 )
 
 def init_db():
@@ -55,13 +56,7 @@ def init_db():
     except Exception as e:
         print(f"Database table initialization failed: {e}")
 
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    description="Enterprise-grade AI Code Reviewer API with GitHub and Groq integrations.",
-    version="1.0.0",
-    docs_url="/docs",
-    openapi_url=f"{settings.API_V1_STR}/openapi.json"
-)
+# (FastAPI app created below after lifespan handler is defined)
 
 # Custom Middlewares for Security Hardening
 class SecureHeadersMiddleware(BaseHTTPMiddleware):
@@ -72,12 +67,22 @@ class SecureHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        # Build dynamic connect-src from configured CORS origins
+        cors_origins = settings.BACKEND_CORS_ORIGINS
+        connect_sources = "'self'"
+        for origin in cors_origins.split(","):
+            origin = origin.strip()
+            if origin:
+                connect_sources += f" {origin}"
+                # Also allow WebSocket variant
+                ws_origin = origin.replace("http://", "ws://").replace("https://", "wss://")
+                connect_sources += f" {ws_origin}"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; "
-            "connect-src 'self' http://localhost:8000 ws://localhost:8000; "
+            f"connect-src {connect_sources}; "
             "img-src 'self' data:;"
         )
         return response
@@ -146,6 +151,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 # CORS Configuration
 configured_origins = [origin.strip() for origin in settings.BACKEND_CORS_ORIGINS.split(",") if origin.strip()]
 
+# ── Lifespan handler (replaces deprecated @app.on_event("startup")) ──
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    init_db()
+    yield
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    description="Enterprise-grade RepoLens AI API with GitHub and multi-provider LLM integrations.",
+    version="1.0.0",
+    docs_url="/docs",
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    lifespan=lifespan
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_origins,
@@ -159,11 +179,6 @@ app.add_middleware(SecureHeadersMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(RateLimitMiddleware, limit=300, window=60)
 
-
-# Database startup hook
-@app.on_event("startup")
-def on_startup():
-    init_db()
 
 # Include Routers
 app.include_router(auth.router, prefix=settings.API_V1_STR)
@@ -180,11 +195,13 @@ app.include_router(health.router, prefix=settings.API_V1_STR)
 app.include_router(explorer.router, prefix=settings.API_V1_STR)
 app.include_router(webhooks.router, prefix=settings.API_V1_STR)
 app.include_router(audit_logs.router, prefix=settings.API_V1_STR)
+app.include_router(chat.router, prefix=settings.API_V1_STR)
+app.include_router(dead_letter_queue.router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 def read_root():
     return {
-        "message": "Welcome to the AI Code Reviewer API",
+        "message": "Welcome to the RepoLens AI API",
         "documentation": "/docs",
         "health_check": f"{settings.API_V1_STR}/health"
     }

@@ -4,15 +4,15 @@ from sqlalchemy import select
 from typing import List
 import uuid
 
-from backend.app.database.database import get_async_db
-from backend.app.models.models import User, Repository, PullRequest, Analysis
-from backend.app.schemas.schemas import RepositoryConnect, RepositoryOut, PullRequestOut
-from backend.app.auth.security import get_current_user
-from backend.app.auth.encryption import encryptor
-from backend.app.services.github_service import GitHubService, parse_repo_url
-from backend.app.config import settings
-from backend.app.utils.logger import get_logger
-from backend.app.schemas.schemas import GitPushRequest
+from app.database.database import get_async_db
+from app.models.models import User, Repository, PullRequest, Analysis
+from app.schemas.schemas import RepositoryConnect, RepositoryOut, PullRequestOut
+from app.auth.security import get_current_user
+from app.auth.encryption import encryptor
+from app.services.github_service import GitHubService, parse_repo_url
+from app.config import settings
+from app.utils.logger import get_logger
+from app.schemas.schemas import GitPushRequest, GitAutomationRequest
 
 logger = get_logger("repositories_router")
 
@@ -284,7 +284,7 @@ async def delete_repository(
     db: AsyncSession = Depends(get_async_db)
 ):
     import os
-    from backend.app.models.models import Report, Analysis
+    from app.models.models import Report, Analysis
     logger.info(f"[Audit Log] User {current_user.id} requested deletion of Repository id: {id}")
     result = await db.execute(
         select(Repository).where(
@@ -395,6 +395,89 @@ async def push_to_github(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to push to GitHub: {str(e)}"
+        )
+
+
+@router.post("/{id}/automated-pr")
+async def automated_pr(
+    id: uuid.UUID,
+    req: GitAutomationRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db)
+):
+    """
+    Full GitHub automation workflow:
+    1. Create a new branch from the default branch
+    2. Push file changes to the new branch
+    3. Open a pull request from the new branch to default
+    """
+    logger.info(f"[Audit Log] User {current_user.id} requested automated PR for repo id: {id}")
+
+    # Verify repository ownership
+    result = await db.execute(
+        select(Repository).where(
+            (Repository.id == id) & (Repository.user_id == current_user.id)
+        )
+    )
+    repo = result.scalars().first()
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found.")
+
+    pat = encryptor.decrypt(current_user.github_pat_encrypted) if current_user.github_pat_encrypted else None
+    if not pat:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GitHub PAT not configured for your profile."
+        )
+
+    github_service = GitHubService(token=pat)
+    source_branch = repo.default_branch or "main"
+
+    try:
+        # Step 1: Create branch
+        logger.info(f"Step 1: Creating branch '{req.branch_name}' from '{source_branch}'")
+        github_service.create_branch(repo.name, req.branch_name, source_branch)
+
+        # Step 2: Push file to the new branch
+        logger.info(f"Step 2: Pushing {req.file_path} to branch '{req.branch_name}'")
+        gh_repo = github_service.client.get_repo(repo.name)
+        try:
+            contents = gh_repo.get_contents(req.file_path, ref=source_branch)
+            original_sha = contents.sha
+        except Exception:
+            original_sha = None
+
+        push_result = gh_repo.update_file(
+            path=req.file_path,
+            message=req.commit_message,
+            content=req.file_content,
+            sha=original_sha,
+            branch=req.branch_name
+        )
+
+        # Step 3: Create Pull Request
+        logger.info(f"Step 3: Creating PR '{req.pr_title}' ({req.branch_name} -> {source_branch})")
+        pr_result = github_service.create_pull_request(
+            repo_name=repo.name,
+            title=req.pr_title,
+            body=req.pr_description,
+            head=req.branch_name,
+            base=source_branch
+        )
+
+        logger.info(f"[Audit Log] Automated PR completed for {repo.name}: branch={req.branch_name}, PR=#{pr_result['pr_number']}")
+        return {
+            "success": True,
+            "branch": req.branch_name,
+            "commit_sha": push_result["commit"].sha,
+            "pr_number": pr_result["pr_number"],
+            "pr_url": pr_result["pr_url"]
+        }
+    except Exception as e:
+        logger.error(f"Automated PR workflow failed for {repo.name}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Automated PR workflow failed: {str(e)}"
         )
 
 

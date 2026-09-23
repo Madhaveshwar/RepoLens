@@ -6,16 +6,16 @@ from typing import List, Optional
 import uuid
 import os
 
-from backend.app.database.database import get_async_db
-from backend.app.models.models import (
+from app.database.database import get_async_db
+from app.models.models import (
     User, Report, Analysis, Repository, SecurityFinding, CodeSmell, TestSuggestion, HealthScore
 )
-from backend.app.schemas.schemas import ReportOut
-from backend.app.auth.security import get_current_user
-from backend.app.services.report_generator import (
+from app.schemas.schemas import ReportOut
+from app.auth.security import get_current_user
+from app.services.report_generator import (
     generate_markdown_report, generate_json_report, generate_csv_report, generate_pdf_report
 )
-from backend.app.utils.logger import get_logger
+from app.utils.logger import get_logger
 
 logger = get_logger("reports_router")
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -92,16 +92,31 @@ async def list_user_reports(
                         "analysis_report": analysis.insights or "Scan complete."
                     }
                     
+                # Calculate fallback scores from actual findings
+                sec_count = len(sec_findings)
+                smell_count = len(code_smells)
+                risk = analysis.risk_score or 0
                 report_data = {
                     "repo_name": repo.name if repo else "Local Repo",
                     "pr_number": None,
-                    "timestamp": analysis.timestamp.strftime("%Y-%m-%d %H:%M UTC"),
-                    "risk_score": analysis.risk_score,
+                    "timestamp": analysis.timestamp.strftime("%Y-%m-%d %H:%M UTC") if analysis.timestamp else "N/A",
+                    "risk_score": risk,
                     "findings": generator_findings,
                     "test_suggestions": test_suggestions,
                     "repo_analysis": repo_analysis_data,
-                    "files_analyzed_log": [],
-                    "scores": {"security": 100 - analysis.risk_score}
+                    "files_analyzed_log": [{
+                        "file": "regenerated_from_db",
+                        "type": "Aggregate",
+                        "status": "Analyzed",
+                        "findings": len(generator_findings)
+                    }],
+                    "scores": {
+                        "code_quality": max(0, 100 - risk),
+                        "security": max(0, 100 - risk - sec_count * 5),
+                        "maintainability": max(0, 100 - risk - smell_count * 3),
+                        "performance": max(0, 100 - risk),
+                        "technical_debt": min(100, risk + sec_count * 3)
+                    }
                 }
                 
                 base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

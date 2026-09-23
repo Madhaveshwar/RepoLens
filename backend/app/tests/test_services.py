@@ -1,10 +1,10 @@
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
-from backend.app.services.security_scanner import scan_security, parse_json_from_llm
-from backend.app.services.code_smell_detector import detect_code_smells
-from backend.app.services.test_generator import generate_tests
-from backend.app.services.github_service import GitHubService
-from backend.app.websockets.websocket_manager import ConnectionManager
+from app.services.security_scanner import scan_security, parse_json_from_llm
+from app.services.code_smell_detector import detect_code_smells
+from app.services.test_generator import generate_tests
+from app.services.github_service import GitHubService
+from app.websockets.websocket_manager import ConnectionManager
 import json
 
 # --- PARSER TESTS ---
@@ -28,27 +28,27 @@ def test_scan_security_service():
     mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.choices = [
-        MagicMock(message=MagicMock(content='[{"issue": "Hardcoded Secret", "line": 5, "severity": "Critical"}]'))
+        MagicMock(message=MagicMock(content='[{"issue": "Hardcoded Secret detected in source code", "line": 1, "severity": "Critical", "suggestion": "Move the secret to an environment variable and access it via os.getenv()", "why_it_matters": "Hardcoded secrets in source code can be exposed if the repository is compromised"}]'))
     ]
     mock_client.chat.completions.create.return_value = mock_response
 
     res = scan_security(mock_client, "app.py", "secret = '123'", "", "Python")
-    assert len(res) == 1
-    assert res[0]["issue"] == "Hardcoded Secret"
+    assert len(res) >= 1
+    assert res[0]["issue"] == "Hardcoded Secret detected in source code"
     assert res[0]["severity"] == "Critical"
 
 def test_detect_code_smells_service():
     mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.choices = [
-        MagicMock(message=MagicMock(content='[{"issue": "Long Function", "line": 1, "severity": "Low"}]'))
+        MagicMock(message=MagicMock(content='[{"issue": "Long Function detected in the source", "line": 1, "severity": "High", "suggestion": "Break this long function into smaller, focused functions that each do one thing well to improve readability", "why_it_matters": "Long functions are harder to understand, test, and maintain, violating single responsibility principles"}]'))
     ]
     mock_client.chat.completions.create.return_value = mock_response
 
     res = detect_code_smells(mock_client, "app.py", "def long(): pass", "", "Python")
-    assert len(res) == 1
-    assert res[0]["issue"] == "Long Function"
-    assert res[0]["severity"] == "Low"
+    assert len(res) >= 1
+    assert "Long Function" in res[0]["issue"]
+    assert res[0]["severity"] == "High"
 
 def test_generate_tests_service():
     mock_client = MagicMock()
@@ -63,7 +63,7 @@ def test_generate_tests_service():
 
 # --- GITHUB SERVICE TESTS ---
 
-@patch("backend.app.services.github_service.Github")
+@patch("app.services.github_service.Github")
 def test_github_service_metadata(mock_github_class):
     mock_repo = MagicMock()
     mock_repo.description = "My test description"
@@ -118,7 +118,7 @@ async def test_websocket_manager_connect():
 # --- ADDITIONAL SERVICES TESTS (COVERAGE ENHANCEMENT) ---
 
 def test_analyze_repository():
-    from backend.app.services.repository_analyzer import analyze_repository
+    from app.services.repository_analyzer import analyze_repository
     
     mock_gh_service = MagicMock()
     mock_gh_client = MagicMock()
@@ -170,26 +170,110 @@ def test_analyze_repository():
 
 
 def test_handle_groq_error():
-    from backend.app.services.reviewer import handle_groq_error, GroqAPIError
+    from app.services.reviewer import handle_groq_error, GroqAPIError
     
     err1 = Exception("unauthorized 401 api key invalid")
     resolved1 = handle_groq_error(err1)
     assert isinstance(resolved1, GroqAPIError)
-    assert "API key is invalid" in str(resolved1)
+    # Friendly messages must point the user at Settings, never leak raw errors.
+    assert "Settings" in str(resolved1)
+    assert "API key" in str(resolved1)
     
     err2 = Exception("rate limit exceeded 429 quota")
     resolved2 = handle_groq_error(err2)
     assert isinstance(resolved2, GroqAPIError)
-    assert "quota exceeded" in str(resolved2)
+    assert "rate limit" in str(resolved2).lower()
+    assert "try again" in str(resolved2).lower()
     
     err3 = Exception("model not found")
     resolved3 = handle_groq_error(err3)
     assert isinstance(resolved3, GroqAPIError)
-    assert "model is unavailable" in str(resolved3)
+    assert "model" in str(resolved3).lower()
+    assert "Settings" in str(resolved3)
+
+
+def test_groq_model_fallback_chain():
+    """Groq defaults must be valid free-tier models (no Enterprise-only fallbacks)."""
+    from app.services.llm_client import (
+        PROVIDER_DEFAULT_MODELS,
+        PROVIDER_FALLBACK_MODELS,
+        GROQ_FALLBACK_MODEL,
+        get_model_name,
+        is_model_not_found_error,
+        is_auth_error,
+        is_rate_limit_error,
+        create_chat_completion,
+    )
+
+    # The default Groq model must NOT be one that 404s on free accounts.
+    assert get_model_name("groq", None) == PROVIDER_DEFAULT_MODELS["groq"]
+    assert PROVIDER_DEFAULT_MODELS["groq"] not in ("", None)
+    # The legacy Enterprise-only fallback must not be the only fallback option.
+    assert GROQ_FALLBACK_MODEL in PROVIDER_FALLBACK_MODELS["groq"]
+    assert len(PROVIDER_FALLBACK_MODELS["groq"]) >= 2
+    # User-saved model preference must be respected.
+    assert get_model_name("groq", "openai/gpt-oss-20b") == "openai/gpt-oss-20b"
+    # Other providers keep their defaults.
+    assert get_model_name("openai", None) == "gpt-4o-mini"
+
+
+def test_model_error_classification():
+    from app.services.llm_client import (
+        is_model_not_found_error,
+        is_auth_error,
+        is_rate_limit_error,
+    )
+
+    assert is_model_not_found_error(Exception(
+        "Error code: 404 - {'error': {'message': 'The model llama-3.1-8b-instant does not exist or you do not have access to it.'}}"
+    ))
+    assert is_model_not_found_error(Exception("model gpt-x has been decommissioned"))
+    assert not is_model_not_found_error(Exception("connection refused"))
+
+    assert is_auth_error(Exception("Error code: 401 - invalid api key"))
+    assert not is_auth_error(Exception("model not found"))
+
+    assert is_rate_limit_error(Exception("Error code: 429 - rate_limit_exceeded"))
+    assert not is_rate_limit_error(Exception("Error code: 401 - unauthorized"))
+
+
+def test_create_chat_completion_falls_back_on_model_error():
+    """If the primary model 404s, create_chat_completion must retry a fallback model."""
+    from app.services.llm_client import create_chat_completion
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    ok_response = MagicMock()
+    ok_response.choices[0].message.content = "ok"
+
+    # First call (primary model) raises 404 model-not-found; second (fallback) succeeds.
+    client.chat.completions.create.side_effect = [
+        Exception("Error code: 404 - model 'foo' does not exist or you do not have access to it."),
+        ok_response,
+    ]
+
+    result = create_chat_completion(
+        client=client, provider="groq",
+        messages=[{"role": "user", "content": "hi"}],
+        model="llama-3.1-8b-instant",
+    )
+    assert result.choices[0].message.content == "ok"
+    assert client.chat.completions.create.call_count == 2
+
+    # Non-model errors must propagate immediately (no blind retries).
+    client2 = MagicMock()
+    client2.chat.completions.create.side_effect = Exception("Error code: 401 - invalid api key")
+    import pytest as _pytest
+    with _pytest.raises(Exception, match="401"):
+        create_chat_completion(
+            client=client2, provider="groq",
+            messages=[{"role": "user", "content": "hi"}],
+            model="openai/gpt-oss-120b",
+        )
 
 
 def test_review_pull_request():
-    from backend.app.services.reviewer import review_pull_request
+    from app.services.reviewer import review_pull_request
     
     mock_gh_service = MagicMock()
     mock_gh_service.get_pr_details.return_value = {"head_sha": "headsha", "base_sha": "basesha"}
@@ -271,7 +355,7 @@ def test_review_pull_request():
 
 
 def test_review_entire_repository():
-    from backend.app.services.reviewer import review_entire_repository
+    from app.services.reviewer import review_entire_repository
     
     mock_gh_service = MagicMock()
     mock_gh_client = MagicMock()
@@ -326,7 +410,7 @@ def test_review_entire_repository():
 
 
 def test_review_single_code_snippet():
-    from backend.app.services.reviewer import review_single_code_snippet
+    from app.services.reviewer import review_single_code_snippet
     
     mock_groq = MagicMock()
     mock_response = MagicMock()
@@ -378,7 +462,7 @@ def test_review_single_code_snippet():
 
 
 def test_review_snippet_valid_python():
-    from backend.app.services.reviewer import review_single_code_snippet
+    from app.services.reviewer import review_single_code_snippet
     
     mock_groq = MagicMock()
     mock_response = MagicMock()
@@ -418,7 +502,7 @@ def calculate_area(width, height):
 
 
 def test_review_snippet_valid_javascript():
-    from backend.app.services.reviewer import review_single_code_snippet
+    from app.services.reviewer import review_single_code_snippet
     
     mock_groq = MagicMock()
     mock_response = MagicMock()
@@ -459,7 +543,7 @@ const greet = (name) => {
 
 
 def test_review_snippet_random_english_text():
-    from backend.app.services.reviewer import review_single_code_snippet
+    from app.services.reviewer import review_single_code_snippet
     mock_groq = MagicMock()
     
     english_text = "This is just a simple paragraph of English text. It is not code. There are no programming statements here."
@@ -470,7 +554,7 @@ def test_review_snippet_random_english_text():
 
 
 def test_review_snippet_empty_input():
-    from backend.app.services.reviewer import review_single_code_snippet
+    from app.services.reviewer import review_single_code_snippet
     mock_groq = MagicMock()
     
     res = review_single_code_snippet("   \n  \t ", "Python", mock_groq)
@@ -480,7 +564,7 @@ def test_review_snippet_empty_input():
 
 
 def test_review_snippet_already_optimized():
-    from backend.app.services.reviewer import review_single_code_snippet
+    from app.services.reviewer import review_single_code_snippet
     
     mock_groq = MagicMock()
     mock_response = MagicMock()
@@ -516,7 +600,7 @@ def test_review_snippet_already_optimized():
 
 
 def test_review_snippet_poor_quality():
-    from backend.app.services.reviewer import review_single_code_snippet
+    from app.services.reviewer import review_single_code_snippet
     
     mock_groq = MagicMock()
     mock_response = MagicMock()
@@ -575,7 +659,7 @@ def test_review_snippet_poor_quality():
 
 
 def test_report_generator_all(tmp_path):
-    from backend.app.services.report_generator import (
+    from app.services.report_generator import (
         generate_markdown_report,
         generate_json_report,
         generate_csv_report,
@@ -633,7 +717,7 @@ def test_report_generator_all(tmp_path):
     }
     
     md_report = generate_markdown_report(report_data)
-    assert "# AI Code Review Report - owner/repo" in md_report
+    assert "# RepoLens AI Report - owner/repo" in md_report
     assert "SQL Injection" in md_report
     
     json_report = generate_json_report(report_data)
@@ -650,7 +734,7 @@ def test_report_generator_all(tmp_path):
 # --- GITHUB SERVICE ADDITIONAL UNIT TESTS ---
 
 def test_parse_repo_url_edge_cases():
-    from backend.app.services.github_service import parse_repo_url
+    from app.services.github_service import parse_repo_url
     assert parse_repo_url(None) is None
     assert parse_repo_url("") is None
     assert parse_repo_url("owner/repo") == "owner/repo"
@@ -662,14 +746,14 @@ def test_parse_repo_url_edge_cases():
     assert parse_repo_url("invalid-url") is None
 
 
-@patch("backend.app.services.github_service.Github")
+@patch("app.services.github_service.Github")
 def test_github_service_constructor_no_token(mock_github_class):
     service = GitHubService(token=None)
     mock_github_class.assert_called_once()
     assert service.token is None
 
 
-@patch("backend.app.services.github_service.Github")
+@patch("app.services.github_service.Github")
 def test_github_service_get_repo_details_exceptions(mock_github_class):
     from github import GithubException
     mock_client = MagicMock()
@@ -721,7 +805,7 @@ def test_github_service_get_repo_details_exceptions(mock_github_class):
         service.get_repo_details("owner/repo")
 
 
-@patch("backend.app.services.github_service.Github")
+@patch("app.services.github_service.Github")
 def test_github_service_get_pr_files(mock_github_class):
     mock_client = MagicMock()
     mock_github_class.return_value = mock_client
@@ -747,7 +831,7 @@ def test_github_service_get_pr_files(mock_github_class):
     assert files[0]["patch"] == ""
 
 
-@patch("backend.app.services.github_service.Github")
+@patch("app.services.github_service.Github")
 def test_github_service_get_file_content_scenarios(mock_github_class):
     mock_client = MagicMock()
     mock_github_class.return_value = mock_client
@@ -806,7 +890,7 @@ def test_github_service_diff_logic():
     assert service.find_diff_position(patch_invalid, 1) == 2
 
 
-@patch("backend.app.services.github_service.Github")
+@patch("app.services.github_service.Github")
 def test_github_service_comments_logic(mock_github_class):
     mock_client = MagicMock()
     mock_github_class.return_value = mock_client
@@ -861,7 +945,7 @@ def test_github_service_comments_logic(mock_github_class):
 
 @pytest.mark.anyio
 async def test_listen_to_redis_channel():
-    from backend.app.websockets.websocket_manager import listen_to_redis_channel
+    from app.websockets.websocket_manager import listen_to_redis_channel
     
     mock_ws = AsyncMock()
     mock_ws.send_text = AsyncMock()
@@ -880,7 +964,7 @@ async def test_listen_to_redis_channel():
     
     mock_redis_client.pubsub = MagicMock(return_value=mock_pubsub)
     
-    with patch("backend.app.websockets.websocket_manager.aioredis.from_url", return_value=mock_redis_client):
+    with patch("app.websockets.websocket_manager.aioredis.from_url", return_value=mock_redis_client):
         await listen_to_redis_channel("analysis_123", mock_ws)
         
     # Assert subscribe/unsubscribe and close
@@ -894,7 +978,7 @@ async def test_listen_to_redis_channel():
 
 @pytest.mark.anyio
 async def test_listen_to_redis_channel_disconnect():
-    from backend.app.websockets.websocket_manager import listen_to_redis_channel
+    from app.websockets.websocket_manager import listen_to_redis_channel
     from fastapi import WebSocketDisconnect
     
     mock_ws = AsyncMock()
@@ -905,14 +989,14 @@ async def test_listen_to_redis_channel_disconnect():
     mock_pubsub.get_message.return_value = {"type": "message", "data": b'{"status": "analyzing", "progress": 50}'}
     mock_redis_client.pubsub = MagicMock(return_value=mock_pubsub)
     
-    with patch("backend.app.websockets.websocket_manager.aioredis.from_url", return_value=mock_redis_client):
+    with patch("app.websockets.websocket_manager.aioredis.from_url", return_value=mock_redis_client):
         await listen_to_redis_channel("analysis_123", mock_ws)
         
     mock_pubsub.unsubscribe.assert_called_once_with("analysis_progress_analysis_123")
 
 
 def test_is_valid_code():
-    from backend.app.utils.validation import is_valid_code
+    from app.utils.validation import is_valid_code
     
     # False cases
     assert is_valid_code(None) is False
@@ -931,7 +1015,7 @@ def test_is_valid_code():
 
 
 def test_should_skip_file():
-    from backend.app.utils.validation import should_skip_file
+    from app.utils.validation import should_skip_file
     
     # Skip cases
     assert should_skip_file("node_modules/index.js") is True

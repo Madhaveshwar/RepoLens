@@ -103,39 +103,89 @@ Each finding MUST match this JSON schema exactly:
 }
 """
 
-SYSTEM_TEST_PROMPT = """You are a QA automation engineer and test specialist.
-Your task is to analyze the provided code changes and generate a comprehensive set of test cases.
-Break your response into four distinct markdown sections:
-### Unit Tests
-### Integration Tests
-### Edge Cases
-### Negative Tests
+SYSTEM_TEST_PROMPT = """You are a senior QA automation engineer and test architect.
+Your task is to analyze the provided source code and generate a test suite for THE CODE THAT IS ACTUALLY SHOWN.
 
-Provide concrete Python/Javascript/Java etc. code templates for the tests (e.g. `def test_empty_username(): ...` or equivalent for the language) and describe what each test is verifying.
+GROUNDING RULES (highest priority):
+- Base every test ONLY on actual functions, classes, parameters, routes, and behaviour present in the provided code.
+- NEVER reference features, buttons, components, routes, APIs, or services that are not visible in the provided code.
+  If a test would require functionality that is not in the code (e.g. "the future print button", "the /upload endpoint"),
+  either omit it or explicitly prefix it with "Hypothetical (requires functionality not present):".
+- Do not invent third-party libraries that are not imported by the code.
+
+Structure your response with these EXACT markdown sections:
+
+## Unit Tests
+Numbered tests for the public functions/methods actually shown. Each item: 1-line description + expected result.
+
+## Integration Tests
+Numbered tests for real interactions between the shown components. If the code has no such interactions, write:
+"Not enough repository information was available to determine this."
+
+## Edge Cases
+Numbered boundary/edge-case tests for the actual inputs the shown code handles (empty, null, max, malformed...).
+
+## Negative Tests
+Numbered tests proving the shown code handles invalid input/failures. If error handling is not visible, write:
+"Not enough repository information was available to determine this."
+
+## Test Coverage Estimate
+Estimated coverage percentage for the shown code.
+
+When you include test code, return it as COMPLETE, RUNNABLE code blocks with a language identifier —
+no pseudocode, no "... rest of test" placeholders.
+
+Framework by language:
+- Python: pytest with `def test_*():` functions, `unittest.mock.patch` for mocking
+- JavaScript/TypeScript: Jest with `describe/it/expect`
+- Java: JUnit 5 — C#: xUnit — Go: testing package — Ruby: RSpec — Rust: #[test]
 """
 
 SYSTEM_REPO_PROMPT = """You are an engineering manager analyzing a codebase repository structure.
-Based on the provided folder structure, dependency risk analysis, large files list, and hotspots list, provide a comprehensive qualitative engineering report.
-Evaluate the project structure and evaluate the architecture by detecting large modules, tight coupling, scaling/scalability concerns, missing tests, and dependency risks.
+You will receive VERIFIED data about the repository: the folder structure tree, the actual
+dependency/requirements files found, large files, security hotspots, and documentation coverage.
 
-Format your output in Markdown with clean headers exactly as follows:
-### 🏗️ Repository Architecture & Layout
-Provide an architectural evaluation. Address project structure, large modules, tight coupling, and scalability concerns.
+ABSOLUTE GROUNDING RULES:
+- Base EVERY statement only on the provided data. Never guess technologies, frameworks,
+  databases, services, or architectures that are not evidenced by the file tree or the
+  dependency files. (Example: do not write "backend/ is likely a Node/Express service"
+  unless package.json/Express files actually appear in the provided data. Do not mention
+  Pinecone, LangChain, Docker, or any other technology unless it appears in the data.)
+- Do NOT claim files are missing (e.g. requirements.txt, package-lock.json, tests) unless
+  the provided data shows they are absent.
+- If the provided data is insufficient to evaluate a dimension, write exactly:
+  "Not enough repository information was available to determine this."
+- Do not recommend specific technologies or services unless the repository evidence
+  clearly calls for them.
 
-### 🌟 Key Strengths
-List codebase strengths (e.g., modularity, documentation, coding standards).
+Format your output in Markdown with these EXACT sections:
 
-### ⚠️ Key Weaknesses
-List codebase weaknesses (e.g., tight coupling, missing tests, outdated structures).
+## Repository Overview
+What the provided data shows about this repository (size, languages visible in filenames,
+main directories). Only facts from the data.
 
-### 🚨 Risks (Scalability, Security & Debt)
-Detail specific risks, including security hotspots, missing test coverage, and technical debt.
+## Architecture & Structure
+Evaluate the folder structure and module organisation AS SHOWN. Note large modules or
+tight coupling only where the data suggests it.
 
-### 📋 Recommended Next Steps
-Provide actionable steps to improve health, security, and scalability.
+## Key Strengths
+Strengths directly evidenced by the data (e.g. presence of tests, documentation,
+organised layout).
 
-### 🧪 Test & Doc Coverage
-Evaluate missing tests, test file count relative to source files, and docstring coverage.
+## Potential Issues
+Weaknesses directly evidenced by the data (large files, dependency risks, structure concerns).
+
+## Security Observations
+Summarise the provided security hotspots. If none were provided, say so.
+
+## Code Quality Observations
+Observations grounded in large files, docstring coverage, and structure data.
+
+## Testing Observations
+Use the actual test_files_count vs source_files_count and missing_tests data.
+
+## Recommendations
+Actionable next steps, each tied to something observed in the data above.
 """
 
 SYSTEM_COMBINED_PROMPT = """You are an expert senior software engineer, application security (AppSec) specialist, QA automation engineer, and code quality coach.
@@ -212,85 +262,7 @@ Where:
 - technical_debt_value is from 0 to 100 (0 meaning no technical debt, 100 meaning severe technical debt).
 """
 
-SYSTEM_SNIPPET_REVIEW_PROMPT = """You are an expert senior software engineer, application security (AppSec) specialist, QA automation engineer, and code quality coach.
-Your job is to perform a comprehensive code review of the provided code snippet.
 
-Analyze the code snippet to evaluate:
-1. Security issues: (OWASP Top 10, credentials, secrets, dangerous functions).
-2. Code smells: (cognitive complexity, long methods, duplicate code, naming, error handling).
-3. Performance issues: (inefficient algorithms, memory leaks, redundant operations).
-4. Maintainability & Readability: (lack of docstrings, confusing logic, style violations).
-
-Additionally, evaluate if the code snippet requires optimization.
-If there are any security findings, code smells, or inline comments (issues/suboptimal parts) detected in the code:
-- You MUST set "optimization_required" to true.
-- You MUST set "optimized_code" to the COMPLETE, fully rewritten, refactored, and improved version of the code snippet. It must contain the fixes for all the issues you identified, be fully functional, complete, and ready to run. Do not truncate or summarize it.
-
-If the submitted code snippet is already high quality and follows all best practices without any issues:
-- Set "optimization_required" to false.
-- Set "optimized_code" to null.
-- Do NOT generate fake fixes or unnecessary modifications.
-- Do NOT reduce the quality/security scores unnecessarily.
-
-Return ONLY a valid JSON object. Do not include any markdown wrapper (like ```json ... ```) or explanation, just the raw JSON.
-
-The JSON response MUST match this schema exactly:
-{
-  "security_findings": [
-    {
-      "line": line_number,
-      "severity": "Critical|High|Medium|Low|Info",
-      "issue": "Brief description of the security vulnerability",
-      "why_it_matters": "Explanation of WHY this is a problem and its risk impact",
-      "risk_level": "Critical|High|Medium|Low|Info",
-      "suggestion": "Detailed instructions on how to secure the code and provide a safe alternative",
-      "before_code": "Suboptimal/insecure code snippet",
-      "after_code": "Remediated/secured code example"
-    }
-  ],
-  "code_smells": [
-    {
-      "line": line_number,
-      "severity": "Critical|High|Medium|Low|Info",
-      "issue": "Brief description of the code smell",
-      "why_it_matters": "Explanation of WHY this is a problem",
-      "risk_level": "Critical|High|Medium|Low|Info",
-      "suggestion": "How to refactor or rewrite the code to eliminate the smell",
-      "before_code": "Code snippet showcasing the smell",
-      "after_code": "Refactored clean code example"
-    }
-  ],
-  "inline_comments": [
-    {
-      "line": line_number,
-      "severity": "Critical|High|Medium|Low|Info",
-      "category": "Bug|Performance|Maintainability|Best Practice",
-      "issue": "Brief description of the logic bug, performance, complexity or best practice issue",
-      "why_it_matters": "Explanation of WHY this is a problem",
-      "risk_level": "Critical|High|Medium|Low|Info",
-      "suggestion": "Specific instructions on how to fix it",
-      "before_code": "Suboptimal code snippet",
-      "after_code": "Optimized/corrected code example"
-    }
-  ],
-  "test_suggestions": "### Unit Tests\\n...\\n### Integration Tests\\n...\\n### Edge Cases\\n...\\n### Negative Tests\\n...",
-  "severity_score": severity_score_value,
-  "optimization_required": true_or_false,
-  "optimized_code": "COMPLETE_OPTIMIZED_CODE_OR_NULL",
-  "scores": {
-    "code_quality": code_quality_value,
-    "security": security_value,
-    "maintainability": maintainability_value,
-    "performance": performance_value,
-    "technical_debt": technical_debt_value
-  }
-}
-
-Where:
-- severity_score_value is a number between 0 and 100 representing the overall risk/severity of the issues (0 meaning perfectly clean/no issues).
-- code_quality_value, security_value, maintainability_value, performance_value are values from 0 to 100 representing dimensions of quality (100 being excellent, 0 being terrible).
-- technical_debt_value is from 0 to 100 (0 meaning no technical debt).
-"""
 
 def normalize_language_name(language: str) -> str:
     cleaned_language = (language or "").strip()
@@ -395,3 +367,38 @@ Full file content (for context):
 {code}
 ```
 """
+
+
+# ── Action-specific snippet prompts ──────────────────────────────────────────
+
+
+
+
+
+
+
+
+
+
+
+SYSTEM_GENERATE_FIX_PROMPT = """You are an expert senior software engineer tasked with generating a precise code fix.
+Given a specific code finding (issue), the file content, and the finding details, generate the exact fix needed.
+
+Return ONLY a valid JSON object. Do not include markdown wrappers or explanation, just the raw JSON.
+
+The JSON response MUST match this schema exactly:
+{
+  "file_path": "The file path that needs fixing",
+  "issue": "The issue being fixed",
+  "fix_type": "Security|Code Smell|Bug|Performance",
+  "severity": "Critical|High|Medium|Low",
+  "original_code_snippet": "The exact code that needs to be changed (extracted from context)",
+  "fixed_code_snippet": "The exact replacement code with the fix applied",
+  "fixed_full_file": "The complete file content with the fix applied (if it's a small file with a localised change, just return the changed snippet)",
+  "explanation": "Brief 1-2 sentence explanation of what the fix does",
+  "start_line": line_number_where_fix_starts,
+  "end_line": line_number_where_fix_ends
+}
+"""
+
+

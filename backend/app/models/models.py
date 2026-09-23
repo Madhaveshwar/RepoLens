@@ -1,9 +1,9 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, Text, JSON
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, Text, JSON, Float
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
-from backend.app.database.database import Base
+from app.database.database import Base
 
 class User(Base):
     __tablename__ = "users"
@@ -18,9 +18,9 @@ class User(Base):
     openrouter_api_key_encrypted = Column(String, nullable=True)
     llm_default_provider = Column(String, default="groq", nullable=True)
     llm_default_model = Column(String, nullable=True)
-    from sqlalchemy import Float as SA_Float
-    llm_temperature = Column(SA_Float, default=0.3, nullable=True)
+    llm_temperature = Column(Float, default=0.3, nullable=True)
     llm_max_tokens = Column(Integer, default=4096, nullable=True)
+    credentials_verified_at = Column(JSON, nullable=True)  # {"groq": "2026-06-24T17:43:00", ...}
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -124,6 +124,7 @@ class SecurityFinding(Base):
     end_line = Column(Integer, nullable=True)
     code_snippet = Column(Text, nullable=True)
     issue_explanation = Column(Text, nullable=True)
+    confidence_score = Column(Integer, default=85, nullable=True)
 
     analysis = relationship("Analysis", back_populates="security_findings")
 
@@ -144,6 +145,7 @@ class CodeSmell(Base):
     end_line = Column(Integer, nullable=True)
     code_snippet = Column(Text, nullable=True)
     issue_explanation = Column(Text, nullable=True)
+    confidence_score = Column(Integer, default=85, nullable=True)
 
     analysis = relationship("Analysis", back_populates="code_smells")
 
@@ -208,3 +210,19 @@ class DeadLetterTask(Base):
     failed_at = Column(DateTime, default=datetime.utcnow)
     resolved = Column(Boolean, default=False)
     resolved_at = Column(DateTime, nullable=True)
+
+class PasswordResetToken(Base):
+    """Single-use, time-limited password reset tokens.
+
+    Only the SHA-256 hash of the raw token is stored, so a database leak
+    cannot be used to reset anyone's password.
+    """
+    __tablename__ = "password_reset_tokens"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    token_hash = Column(String, unique=True, index=True, nullable=False)  # sha256(raw_token)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)  # set when consumed; NULL = still valid
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")

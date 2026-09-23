@@ -8,6 +8,7 @@ export interface Analysis {
   status: string;
   progress: number;
   risk_score: number;
+  health_score?: number;
   latency_seconds: number;
   estimated_token_usage: number;
   files_analyzed_count: number;
@@ -25,6 +26,7 @@ export interface Analysis {
 
 export interface SecurityFinding {
   id: string;
+  analysis_id: string;
   file: string;
   line: number;
   severity: string;
@@ -38,6 +40,7 @@ export interface SecurityFinding {
 
 export interface CodeSmell {
   id: string;
+  analysis_id: string;
   file: string;
   line: number;
   severity: string;
@@ -57,8 +60,36 @@ export interface ProgressDetailed {
   current_file: string;
 }
 
-const MAX_POLL_RETRIES = 30;   // 5s * 30 = 2.5 minutes max
-const POLL_INTERVAL_MS = 5000; // 5 seconds between polls
+// ── Scan Stage Labels (matches RepositoryDetail.tsx timeline) ─────
+export const SCAN_STAGES = [
+  "Cloning Repository",
+  "Indexing/Analyzing Files",
+  "Running Security Checks",
+  "Generating AI Findings",
+  "Generating Tests",
+  "Creating Insights",
+  "Saving Results"
+];
+
+const MAX_POLL_RETRIES = 60;   // 2.5s * 60 = 2.5 minutes max
+const POLL_INTERVAL_MS = 2500; // 2.5 seconds between polls (faster UI updates)
+
+// Map backend progress % to stage index
+function progressToStageIndex(progress: number): number {
+  if (progress < 10) return 0;
+  if (progress < 30) return 1;
+  if (progress < 50) return 2;
+  if (progress < 65) return 3;
+  if (progress < 80) return 4;
+  if (progress < 90) return 5;
+  return 6;
+}
+
+// Map status string to a human-readable stage message
+function statusToStageMessage(status: string, progress: number): string {
+  const stageIdx = progressToStageIndex(progress);
+  return SCAN_STAGES[stageIdx] || status;
+}
 
 interface AnalysisState {
   analyses: Analysis[];
@@ -147,6 +178,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
         ]);
 
         const analysisData = analysisRes.data;
+
         set({
           activeAnalysis: analysisData,
           securityFindings: secRes.data,
@@ -171,7 +203,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
         const res = await axios.get(`/analysis/repo/${repoId}`);
         set({ analyses: res.data });
       } catch (err: any) {
-        console.error("Failed to load repo analyses:", err);
+        // Failed to load repo analyses
       }
     },
 
@@ -183,6 +215,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
 
       // ── Single interval polling ──────────────────────────────
       // Only ONE polling mechanism. Stops on completion, failure, error, or max retries.
+      // Polls every 2.5s for responsive progress UI.
       pollingIntervalId = setInterval(async () => {
         if (pollingStopped) return;
         if (pollRetryCount >= MAX_POLL_RETRIES) {
@@ -196,31 +229,51 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
           const data = res.data;
           pollRetryCount = 0; // Reset on success
 
+          const pct = data.progress;
+          const stageMsg = statusToStageMessage(data.status, pct);
+
+          // Estimate total_files when backend only returns files_analyzed_count
+          const filesAnalyzed = data.files_analyzed_count || 0;
+          let totalFiles = data.total_files || 0;
+          if (totalFiles === 0 && pct > 0 && filesAnalyzed > 0) {
+            totalFiles = Math.round(filesAnalyzed / Math.max(pct / 100, 0.01));
+          } else if (totalFiles === 0 && pct > 0) {
+            // If we have progress but no files yet, show "estimating..."
+            totalFiles = -1; // sentinel: show "?" in UI
+          } else if (totalFiles === 0) {
+            totalFiles = 0; // initial state, keep as 0
+          }
+
           set((state) => ({
-            progress: data.progress,
-            progressStatus: data.status,
+            progress: pct,
+            progressStatus: pct > 0 && pct < 100 ? stageMsg : data.status === "completed" ? "completed" : data.status,
             progressDetailed: {
               status: data.status,
-              message: `Polling: ${data.progress}%`,
-              files_analyzed: data.files_analyzed_count || 0,
-              total_files: data.files_analyzed_count || 0,
-              current_file: ""
+              message: stageMsg,
+              files_analyzed: filesAnalyzed,
+              total_files: totalFiles,
+              current_file: data.current_file || ""
             },
             activeAnalysis: {
               ...state.activeAnalysis,
-              progress: data.progress,
+              progress: pct,
               status: data.status,
               files_analyzed_count: data.files_analyzed_count,
             } as any,
             analyses: state.analyses.map((an) =>
-              an.id === analysisId ? { ...an, progress: data.progress, status: data.status } : an
+              an.id === analysisId ? { ...an, progress: pct, status: data.status } : an
             )
           }));
 
-          // Terminal states → stop polling and fetch details ONCE
-          if (data.status === "completed" || data.progress === 100) {
+          // Terminal states → stop polling, fetch details, and refresh repo analyses
+          if (data.status === "completed" || pct >= 100) {
             stopPolling();
             get().fetchAnalysisDetails(analysisId);
+            // Refresh the repo analyses list so the history shows the new scan
+            const state = get();
+            if (state.activeAnalysis?.repository_id) {
+              get().fetchRepoAnalyses(state.activeAnalysis.repository_id);
+            }
           } else if (data.status === "failed" || data.status === "cancelled") {
             stopPolling();
             set({ error: `Analysis ${data.status}.`, progressStatus: data.status });
@@ -277,9 +330,8 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
           } as any,
           progressDetailed: {
             status: data.status,
-            message: data.message || "",
-            files_analyzed: data.files_analyzed || 0,
-            total_files: data.total_files || 0,
+            message: data.message || "",                files_analyzed: data.files_analyzed || 0,
+                total_files: typeof data.total_files === 'number' ? data.total_files : 0,
             current_file: data.current_file || ""
           },
           analyses: state.analyses.map((an) =>
@@ -296,7 +348,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
       };
 
       ws.onerror = () => {
-        console.error("WebSocket connection error — falling back to polling.");
+        // WebSocket unavailable — polling fallback is active.
       };
 
       ws.onclose = () => {

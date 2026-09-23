@@ -32,7 +32,7 @@ class PDFReport(FPDF):
         self.set_text_color(255, 255, 255)
         self.set_font("Helvetica", "B", 12)
         self.set_y(8)
-        self.cell(0, 10, clean_pdf_text(f"AI Code Reviewer - {self.repo_name}"), border=0, align="L", new_x=XPos.RIGHT, new_y=YPos.TOP)
+        self.cell(0, 10, clean_pdf_text(f"RepoLens AI - {self.repo_name}"), border=0, align="L", new_x=XPos.RIGHT, new_y=YPos.TOP)
         if self.pr_number:
             self.cell(0, 10, clean_pdf_text(f"PR #{self.pr_number}"), border=0, align="R", new_x=XPos.RIGHT, new_y=YPos.TOP)
         self.ln(20)
@@ -60,7 +60,7 @@ def generate_markdown_report(data: dict[str, object]) -> str:
             severity_counts[sev] += 1
 
     md = []
-    md.append(f"# AI Code Review Report - {repo_name}")
+    md.append(f"# RepoLens AI Report - {repo_name}")
     if pr_number:
         md.append(f"**Pull Request:** #{pr_number}")
     md.append(f"**Generated at:** {data.get('timestamp', 'N/A')}\n")
@@ -165,11 +165,15 @@ def generate_markdown_report(data: dict[str, object]) -> str:
         md.append(test_suggestions)
         md.append("\n")
 
-    if repo_analysis:
+    if repo_analysis and isinstance(repo_analysis, dict):
         md.append("## Repository Health Analysis")
         md.append(f"- **Repository Health Score:** {repo_analysis.get('health_score', 0)}/100")
         md.append("- **Repository Summary:**")
-        md.append(repo_analysis.get("analysis_report", ""))
+        analysis_report = repo_analysis.get("analysis_report")
+        if analysis_report:
+            md.append(str(analysis_report))
+        else:
+            md.append("No qualitative analysis available.")
 
     return "\n".join(md)
 

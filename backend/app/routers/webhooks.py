@@ -1,15 +1,15 @@
 import hmac
 import hashlib
 import json
-from fastapi import APIRouter, Request, Header, HTTPException, Depends, status
+from fastapi import APIRouter, Request, Header, HTTPException, Depends, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from backend.app.config import settings
-from backend.app.database.database import get_async_db
-from backend.app.models.models import Repository, PullRequest, Analysis
-from backend.app.tasks.tasks import run_analysis_task
-from backend.app.utils.audit import log_audit_event
-from backend.app.utils.logger import get_logger
+from app.config import settings
+from app.database.database import get_async_db
+from app.models.models import Repository, PullRequest, Analysis
+from app.tasks.tasks import enqueue_analysis_task
+from app.utils.audit import log_audit_event
+from app.utils.logger import get_logger
 
 logger = get_logger("webhooks_router")
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -17,6 +17,7 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 @router.post("/github")
 async def github_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_github_event: str = Header(...),
     x_hub_signature_256: str = Header(None),
     db: AsyncSession = Depends(get_async_db)
@@ -77,7 +78,7 @@ async def github_webhook(
             )
             repo = repo_res.scalars().first()
             if not repo:
-                logger.info(f"Repository {repo_full_name} is not connected to AI Code Reviewer. Skipping webhook trigger.")
+                logger.info(f"Repository {repo_full_name} is not connected to RepoLens AI. Skipping webhook trigger.")
                 return {"message": f"Repository {repo_full_name} not connected."}
                 
             # Create or update PullRequest record
@@ -118,8 +119,8 @@ async def github_webhook(
             await db.commit()
             await db.refresh(analysis)
             
-            # Trigger celery review
-            run_analysis_task.delay(str(analysis.id))
+            # Trigger analysis review
+            enqueue_analysis_task(background_tasks, str(analysis.id))
             
             await log_audit_event(
                 db=db,
@@ -164,7 +165,7 @@ async def github_webhook(
             await db.commit()
             await db.refresh(analysis)
             
-            run_analysis_task.delay(str(analysis.id))
+            enqueue_analysis_task(background_tasks, str(analysis.id))
             
             await log_audit_event(
                 db=db,

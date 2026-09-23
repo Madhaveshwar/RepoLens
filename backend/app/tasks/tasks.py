@@ -4,44 +4,70 @@ from celery import Celery
 import redis
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 
-from backend.app.config import settings
-from backend.app.database.database import SessionLocal
-from backend.app.models.models import (
+from app.config import settings
+from app.database.database import SessionLocal
+from app.models.models import (
     Analysis, Repository, PullRequest, User,
     SecurityFinding, CodeSmell, TestSuggestion, HealthScore, Report
 )
-from backend.app.auth.encryption import encryptor
-from backend.app.services.github_service import GitHubService
-from backend.app.services.reviewer import review_pull_request, review_entire_repository
-from backend.app.services.llm_client import build_llm_client, get_model_name, build_groq_client
-from backend.app.services.report_generator import (
+from app.auth.encryption import encryptor
+from app.services.github_service import GitHubService
+from app.services.reviewer import review_pull_request, review_entire_repository
+from app.services.llm_client import build_llm_client, get_model_name, build_groq_client, friendly_llm_error
+from app.services.report_generator import (
     generate_markdown_report, generate_json_report, generate_csv_report, generate_pdf_report
 )
-from backend.app.utils.logger import get_logger
+from app.utils.logger import get_logger
 
 logger = get_logger("celery_worker")
 
-celery_app = Celery(
-    "tasks",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL
-)
-celery_app.conf.update(
-    broker_connection_retry_on_startup=True,
-    task_serializer="json",
-    result_serializer="json",
-    accept_content=["json"],
-    timezone="UTC",
-    enable_utc=True,
-    task_routes={
-        "backend.app.tasks.tasks.run_analysis_task": {"queue": "celery"},
-        "dead_letter": {"queue": "dead_letter"}
-    }
-)
+# ──────────────────────────────────────────────────────────────────
+#  REDIS & CELERY INITIALIZATION  (graceful fallback)
+#  If Redis is unavailable (e.g. no Redis service configured on
+#  Render), the web server should still start without crashing.
+#  Celery features will be disabled until Redis becomes available.
+# ──────────────────────────────────────────────────────────────────
+celery_app = None
+redis_client = None
 
-redis_client = redis.Redis.from_url(settings.REDIS_URL, socket_timeout=2, socket_connect_timeout=2)
+def _init_celery_and_redis():
+    """Initialize Celery app and Redis client. Safe to call multiple times."""
+    global celery_app, redis_client
+    if celery_app is not None:
+        return  # already initialized
+    try:
+        _celery = Celery(
+            "tasks",
+            broker=settings.REDIS_URL,
+            backend=settings.REDIS_URL
+        )
+        _celery.conf.update(
+            broker_connection_retry_on_startup=True,
+            task_serializer="json",
+            result_serializer="json",
+            accept_content=["json"],
+            timezone="UTC",
+            enable_utc=True,
+            task_routes={
+                "app.tasks.tasks.run_analysis_task": {"queue": "celery"},
+                "dead_letter": {"queue": "dead_letter"}
+            }
+        )
+        _redis = redis.Redis.from_url(settings.REDIS_URL, socket_timeout=2, socket_connect_timeout=2)
+        _redis.ping()  # verify connection
+        celery_app = _celery
+        redis_client = _redis
+        logger.info(f"Celery and Redis initialized successfully: {settings.REDIS_URL}")
+    except Exception as exc:
+        logger.warning(f"Redis not available at {settings.REDIS_URL}. Celery/WebSocket features disabled: {exc}")
+        celery_app = None
+        redis_client = None
+
+# Attempt initialization at import time; failure is non-fatal
+_init_celery_and_redis()
+
 
 def update_progress(
     analysis_id: str,
@@ -106,15 +132,80 @@ def update_progress(
     except Exception as exc:
         logger.warning(f"Redis progress publish failed for analysis {analysis_id}: {exc}")
 
-@celery_app.task(
-    bind=True,
-    max_retries=3,
-    default_retry_delay=10,
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    retry_kwargs={"max_retries": 3}
-)
-def run_analysis_task(self, analysis_id: str):
+# ── Celery task registration ────────────────────────────────────
+# The task function is always defined. If Celery is available (Redis
+# configured), it is registered as a Celery task and gets .delay().
+# If Celery is unavailable, a .delay() stub is attached so importing
+# routers never crash on startup.
+
+if celery_app is not None:
+    # Register as a proper Celery task with retry & routing
+    @celery_app.task(
+        bind=True,
+        max_retries=3,
+        default_retry_delay=10,
+        autoretry_for=(Exception,),
+        retry_backoff=True,
+        retry_kwargs={"max_retries": 3}
+    )
+    def run_analysis_task(self, analysis_id: str):
+        return _run_analysis_impl(self, analysis_id)
+else:
+    # Celery unavailable ─ define a plain sync function with .delay() stub
+    def run_analysis_task(self=None, analysis_id: str = None):
+        # Support both calling conventions:
+        #   run_analysis_task(analysis_id="some-id")  ← keyword arg (preferred)
+        #   run_analysis_task("some-id")               ← positional arg (used by tests)
+        if self is not None and analysis_id is None:
+            # First positional arg is actually the analysis_id
+            analysis_id = self
+            self = None
+        if not analysis_id:
+            raise ValueError("analysis_id is required")
+        return _run_analysis_impl(self, analysis_id)
+    # Attach .delay() so callers (routers) don't break
+    run_analysis_task.delay = lambda analysis_id=None: run_analysis_task(analysis_id=analysis_id)
+
+
+def enqueue_analysis_task(background_tasks, analysis_id: str):
+    """
+    Enqueue an analysis task for asynchronous execution.
+
+    When Celery is available (Redis running), dispatches via Celery workers.
+    When Celery is unavailable, uses FastAPI BackgroundTasks so the HTTP
+    response returns immediately instead of blocking on the synchronous
+    .delay() stub (which would run the entire scan inside the request).
+
+    Parameters
+    ----------
+    background_tasks : BackgroundTasks
+        FastAPI BackgroundTasks instance from the route handler.
+    analysis_id : str
+        The UUID of the Analysis record to scan.
+    """
+    if celery_app is not None:
+        try:
+            run_analysis_task.delay(analysis_id)
+            logger.info(f"Analysis task {analysis_id} dispatched via Celery.")
+            return
+        except Exception as exc:
+            logger.warning(
+                f"Failed to dispatch Celery analysis task {analysis_id}, "
+                f"falling back to BackgroundTasks: {exc}"
+            )
+
+    # Celery unavailable or dispatch failed → use BackgroundTasks
+    background_tasks.add_task(run_analysis_task, None, analysis_id)
+    logger.info(f"Analysis task {analysis_id} enqueued via BackgroundTasks.")
+
+
+
+def _run_analysis_impl(self, analysis_id: str):
+    """Core implementation of the analysis pipeline.
+    
+    Executes a PR review or repository scan, persists findings,
+    and generates export reports.
+    """
     import uuid as std_uuid
     analysis_id = std_uuid.UUID(analysis_id) if isinstance(analysis_id, str) else analysis_id
     db = SessionLocal()
@@ -177,7 +268,7 @@ def run_analysis_task(self, analysis_id: str):
             logger.error("Scan failure: No LLM API Key is configured for any provider.")
             update_progress(analysis_id, 100, "failed: No LLM API Key configured", status="failed", db=db)
             analysis.status = "failed"
-            analysis.insights = "Error: No LLM API Key is configured. Add a key in Settings."
+            analysis.insights = "The configured LLM API key is invalid or expired. Please update it in Settings."
             db.commit()
             return "Failed: No LLM API Key configured"
 
@@ -254,7 +345,7 @@ def run_analysis_task(self, analysis_id: str):
         analysis.total_tokens = t_stats.get("total_tokens") or 0
         analysis.scan_duration_seconds = int(time.time() - start_time)
         
-        analysis.timestamp = datetime.utcnow()
+        analysis.timestamp = datetime.now(timezone.utc)
         
         logger.info(
             f"Metrics saved: risk_score={analysis.risk_score}, "
@@ -382,7 +473,7 @@ def run_analysis_task(self, analysis_id: str):
         report_data = {
             "repo_name": repo.name,
             "pr_number": pr.number if analysis.pull_request_id else None,
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "risk_score": analysis.risk_score,
             "findings": results.get("findings", []),
             "test_suggestions": test_suggs,
@@ -441,18 +532,32 @@ def run_analysis_task(self, analysis_id: str):
             logger.info(f"Task run_analysis_task failed. Retrying (attempt {self.request.retries + 1}/{self.max_retries})...")
             db.close()
             raise self.retry(exc=exc, countdown=10 * (2 ** self.request.retries))
-            
+
         duration = time.time() - start_time
-        logger.error(f"Celery analysis task failed and exhausted all retries after {duration:.2f}s: {exc}", exc_info=True)
-        
-        # For background_tasks fallback mode, don't attempt retries - just log and clean up
+        logger.error(f"Analysis task failed after {duration:.2f}s: {exc}", exc_info=True)
+
+        # Convert common errors to user-friendly messages
+        def _friendly_scan_error(err_msg: str) -> str:
+            if "401" in err_msg or "invalid" in err_msg.lower() or "api_key" in err_msg.lower():
+                return "The configured LLM API key is invalid or expired. Please update it in Settings."
+            if "429" in err_msg or "rate_limit" in err_msg or "quota" in err_msg:
+                return "LLM API rate limit exceeded. Please wait a moment and try again."
+            if "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+                return "The analysis timed out. Your repository may be too large. Try scanning fewer files."
+            if "model" in err_msg.lower() and ("not found" in err_msg.lower() or "unavailable" in err_msg.lower() or "does not exist" in err_msg.lower()):
+                return "The selected AI model is currently unavailable. Try a different model in Settings."
+            if "github" in err_msg.lower() or "bad credentials" in err_msg.lower():
+                return "GitHub token is invalid or lacks access to this repository. Please update your PAT in Settings."
+            return f"Analysis failed: {err_msg[:200]}"
+
+        duration = time.time() - start_time
         if not is_celery_mode:
             try:
                 analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
                 if analysis:
                     analysis.status = "failed"
                     analysis.progress = 100
-                    analysis.insights = f"Job failed due to error: {str(exc)}\\n\\nStack trace:\\n{traceback.format_exc()}"
+                    analysis.insights = _friendly_scan_error(str(exc))
                     db.commit()
             except Exception:
                 pass
@@ -461,8 +566,8 @@ def run_analysis_task(self, analysis_id: str):
             return f"Failed: {str(exc)}"
         
         try:
-            from backend.app.models.models import DeadLetterTask
-            from backend.app.utils.audit import log_audit_event_sync
+            from app.models.models import DeadLetterTask
+            from app.utils.audit import log_audit_event_sync
             
             dlq_task = DeadLetterTask(
                 task_id=str(self.request.id),
@@ -500,7 +605,7 @@ def run_analysis_task(self, analysis_id: str):
         analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
         if analysis:
             analysis.status = "failed"
-            analysis.insights = f"Job failed due to error: {str(exc)}\n\nStack trace:\n{traceback.format_exc()}"
+            analysis.insights = _friendly_scan_error(str(exc))
             db.commit()
     finally:
         db.close()

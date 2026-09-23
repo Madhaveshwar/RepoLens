@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "AI Code Reviewer API"
+    PROJECT_NAME: str = "RepoLens AI API"
     API_V1_STR: str = "/api/v1"
     
     # JWT Secrets
@@ -45,9 +45,67 @@ class Settings(BaseSettings):
     # Force LLM requests to bypass cache
     FORCE_GROQ_ANALYSIS: bool = os.getenv("FORCE_GROQ_ANALYSIS", "false").lower() == "true"
     
+    # App environment: "development" or "production". Controls whether dev-only
+    # conveniences (e.g. returning password-reset links in API responses) are allowed.
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+
+    # Frontend base URL, used to build password-reset links sent by email.
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+    # Password reset tokens
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "30"))
+
+    # SMTP / email sending (optional). Password-reset emails are only sent when
+    # SMTP_HOST and SMTP_FROM are configured; otherwise the app falls back to the
+    # development reset flow (never in production).
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: str = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM: str = os.getenv("SMTP_FROM", "")
+    SMTP_USE_TLS: bool = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+    
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
 
+    @property
+    def IS_PRODUCTION(self) -> bool:
+        return self.ENVIRONMENT.strip().lower() in ("production", "prod")
+
 settings = Settings()
+
+# ========== SQLITE PATH ANCHORING ==========
+# Relative SQLite URLs (e.g. "sqlite+aiosqlite:///./dev.db") resolve against the
+# process working directory. A server started from the wrong folder would then
+# silently create/use an EMPTY database at that location — the classic symptom
+# being "registration succeeds but login says invalid email or password"
+# (register and login effectively hitting different databases).
+# Anchor every relative SQLite path to the backend/ directory so ALL entry
+# points (uvicorn, alembic, scripts, tests) share exactly one database file.
+from pathlib import Path as _Path
+
+_BACKEND_ROOT = _Path(__file__).resolve().parent.parent
+
+def _is_windows_drive(path: str) -> bool:
+    """True for paths like 'E:/...' (drive letter, not a posix-absolute path)."""
+    return len(path) >= 2 and path[1] == ":"
+
+def _anchor_sqlite_path(url: str) -> str:
+    """Rewrite relative sqlite URLs to absolute paths under backend/."""
+    if not url or not url.startswith("sqlite"):
+        return url
+    prefix, _, rest = url.partition("///")
+    prefix = prefix.rstrip(":")  # partition keeps the scheme colon; drop it
+    if not rest or rest.startswith("/") and not _is_windows_drive(rest) or rest == ":memory:":
+        # Absolute path (sqlite:////...) or in-memory DB — leave untouched.
+        return url
+    db_path = (_BACKEND_ROOT / rest).resolve()
+    return f"{prefix}:///{db_path.as_posix()}"
+
+settings.DATABASE_URL = _anchor_sqlite_path(settings.DATABASE_URL)
+settings.SYNC_DATABASE_URL = _anchor_sqlite_path(settings.SYNC_DATABASE_URL)
+
+if settings.DATABASE_URL.startswith("sqlite"):
+    print(f"[Config] SQLite database anchored to: {settings.DATABASE_URL.split('///')[-1]}")
 
 # ========== STARTUP VALIDATION ==========
 # These validations run at module import time to fail fast.

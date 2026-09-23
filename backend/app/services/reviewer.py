@@ -8,34 +8,34 @@ from datetime import datetime, timezone
 from typing import Any
 from groq import Groq
 from langsmith import Client, traceable
-from backend.app.utils.logger import get_logger
+from app.utils.logger import get_logger
 
 logger = get_logger("groq_service")
 
-from backend.app.utils.prompts import (
-    SYSTEM_SNIPPET_REVIEW_PROMPT,
+from app.utils.prompts import (
+    SYSTEM_COMBINED_PROMPT,
     normalize_language_name,
 )
-from backend.app.utils.validation import is_valid_code, should_skip_file, validate_code_snippet
-from backend.app.services.repository_analyzer import analyze_repository
-from backend.app.config import settings
+from app.utils.validation import is_valid_code, should_skip_file, validate_code_snippet
+from app.services.repository_analyzer import analyze_repository
+from app.config import settings
+from app.services.llm_client import (
+    GROQ_FALLBACK_MODEL,
+    friendly_llm_error,
+    is_model_not_found_error,
+)
 
-MODEL_NAME = "llama-3.3-70b-versatile"
+# Primary review model. For Groq accounts without Enterprise access the
+# create_chat_completion() fallback chain resolves an available model.
+MODEL_NAME = "openai/gpt-oss-120b"
 MODEL_TEMPERATURE = 0.3
 
 class GroqAPIError(Exception):
     pass
 
-def handle_groq_error(exc: Exception) -> Exception:
-    err_msg = str(exc)
-    err_msg_lower = err_msg.lower()
-    if "api_key" in err_msg_lower or "unauthorized" in err_msg_lower or "401" in err_msg_lower:
-        return GroqAPIError("Groq API key is invalid or expired. Please renew the key.")
-    if "429" in err_msg_lower or "rate_limit" in err_msg_lower or "quota" in err_msg_lower or "limit exceeded" in err_msg_lower:
-        return GroqAPIError("Groq quota exceeded. Please try later.")
-    if "model" in err_msg_lower and ("not found" in err_msg_lower or "unavailable" in err_msg_lower):
-        return GroqAPIError("Selected Groq model is unavailable.")
-    return GroqAPIError(f"Groq API error: {err_msg}")
+def handle_groq_error(exc: Exception, provider: str = "groq") -> Exception:
+    """Convert a raw provider exception into a friendly, user-facing message."""
+    return GroqAPIError(friendly_llm_error(provider, exc))
 
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".reviewer_cache.json")
 
@@ -89,8 +89,107 @@ def update_findings_file(findings: list, filename: str) -> list:
             updated.append(new_item)
     return updated
 
+def validate_finding_evidence(finding: dict, code_lines: list[str]) -> bool:
+    """Validate that an LLM finding has real evidence in the source code.
+    
+    Returns True if the finding passes evidence validation (is likely real).
+    Returns False if the finding appears to be hallucinated or fabricated.
+    
+    Uses lenient heuristics — accepts findings unless clearly fabricated.
+    """
+    line_val = int(finding.get("line", 0)) if str(finding.get("line")).isdigit() else 0
+    before_code = (finding.get("before_code") or "").strip()
+    issue = (finding.get("issue") or "").lower()
+
+    # Check 1: Line number must be valid
+    if line_val < 1 or line_val > len(code_lines):
+        logger.info(f"Evidence validation rejected: line {line_val} out of range (file has {len(code_lines)} lines)")
+        return False
+
+    actual_line = code_lines[line_val - 1].strip()
+    
+    # Fuzzy match: normalize whitespace and compare lowercased
+    before_norm = " ".join(before_code.lower().split())
+    actual_norm = " ".join(actual_line.lower().split())
+    
+    # If before_code exists and doesn't match at all, check deeper
+    if before_code:
+        # Accept if normalized strings overlap
+        if before_norm in actual_norm or actual_norm in before_norm:
+            return True
+        
+        # Accept if the issue description keywords appear in the actual line
+        issue_keywords = [w for w in issue.split() if len(w) > 3]
+        if issue_keywords:
+            has_keyword = any(kw in actual_norm for kw in issue_keywords)
+            if has_keyword:
+                return True
+        
+        # Only reject if we're confident it's a hallucination:
+        # before_code is set, doesn't match, AND line looks completely unrelated
+        # Check if the actual line is a comment, blank, or import (unlikely finding target)
+        if actual_line.startswith(("#", "//", "/*", "*", "import ", "from ", "package ")) or not actual_line:
+            logger.info(f"Evidence validation rejected: line {line_val} looks unrelated to finding '{issue[:50]}'")
+            return False
+        
+        # Lenient default: accept findings for code lines even if before_code doesn't match exactly
+        # The LLM may have formatted the before_code differently
+        return True
+
+    # No before_code provided — still accept if line is valid and not clearly unrelated
+    issue_keywords = [w for w in issue.split() if len(w) > 3]
+    if issue_keywords:
+        actual_lower = actual_line.lower()
+        has_keyword = any(kw in actual_lower for kw in issue_keywords)
+        if has_keyword:
+            return True
+    
+    # Lenient: accept findings even without before_code if the line is code (not comment/blank)
+    if not actual_line.startswith(("#", "//", "/*", "*")) and actual_line.strip():
+        return True
+    
+    return False
+
+
+def apply_static_scanners(filename: str, code: str, language: str) -> dict[str, list]:
+    """Run static security and code smell scanners on source code.
+    Returns dict with 'security_findings' and 'code_smells' keys."""
+    sec_findings = []
+    smell_findings = []
+
+    try:
+        from app.services.static_security_scanner import StaticSecurityAnalyzer
+        sec_findings = StaticSecurityAnalyzer.scan(code=code, filename=filename, language=language)
+        logger.info(f"Static security scanner: {len(sec_findings)} findings for {filename}")
+    except Exception as e:
+        logger.warning(f"Static security scanner failed for {filename}: {e}")
+
+    try:
+        from app.services.static_code_smell_detector import StaticCodeSmellDetector
+        smell_findings = StaticCodeSmellDetector.scan(code=code, filename=filename, language=language)
+        logger.info(f"Static code smell detector: {len(smell_findings)} findings for {filename}")
+    except Exception as e:
+        logger.warning(f"Static code smell detector failed for {filename}: {e}")
+
+    return {
+        "security_findings": sec_findings,
+        "code_smells": smell_findings,
+    }
+
 SYSTEM_MULTI_FILE_PROMPT = """You are an expert senior software engineer, application security (AppSec) specialist, QA automation engineer, and code quality coach.
 Your job is to perform a comprehensive code review of multiple source files and (optionally) generate a repository-level qualitative engineering report.
+
+CRITICAL EVIDENCE RULES — YOU MUST FOLLOW THESE:
+1. The `before_code` field MUST contain the EXACT source code from the file at the reported line number. Copy it character-for-character. Do NOT paraphrase, summarize, or fabricate code.
+2. The `line` field MUST be the exact line number where the issue occurs in the provided file content.
+3. If you cannot find a real issue at a specific line, do NOT report a finding for that line. Only report findings where you can point to concrete evidence in the source code.
+4. Do NOT report generic/template findings like 'Hardcoded secrets' on lines that contain os.getenv(), load_dotenv(), or configuration classes.
+5. Do NOT report 'Insecure deserialization' for json.loads() — that is safe. Only report for pickle.loads(), yaml.load(), etc.
+6. Do NOT report 'Magic numbers' for list comprehensions, variable references, or named constants.
+7. Do NOT report 'Importing unnecessary modules' unless the import is clearly never used anywhere in the file.
+8. Do NOT report 'Complex class' for simple exception classes or data containers.
+9. Do NOT report 'Duplicate code' without verifying the same code block appears twice.
+10. Only report issues you are CERTAIN about. If unsure, return an empty list for that category.
 
 For each file, you must identify:
 1. Security Findings:
@@ -125,7 +224,7 @@ The JSON response MUST match this schema exactly:
           "why_it_matters": "Explanation of WHY this is a problem and its risk impact (OWASP-aligned context)",
           "risk_level": "Critical|High|Medium|Low|Info",
           "suggestion": "Detailed instructions on how to secure the code and provide a safe alternative",
-          "before_code": "Language-specific insecure or bad code snippet from the original file",
+          "before_code": "EXACT COPY of the source code line from the file at the reported line number",
           "after_code": "Language-specific remediated/secured code example demonstrating the fix"
         }
       ],
@@ -137,7 +236,7 @@ The JSON response MUST match this schema exactly:
           "why_it_matters": "Explanation of WHY this is a problem (maintainability, cognitive load)",
           "risk_level": "Critical|High|Medium|Low|Info",
           "suggestion": "How to refactor or rewrite the code to eliminate the smell",
-          "before_code": "Language-specific code snippet showcasing the smell",
+          "before_code": "EXACT COPY of the source code line from the file at the reported line number",
           "after_code": "Language-specific refactored clean code example demonstrating the fix"
         }
       ],
@@ -150,7 +249,7 @@ The JSON response MUST match this schema exactly:
           "why_it_matters": "Explanation of WHY this is a problem (inefficient loop, memory leak, bug impact)",
           "risk_level": "Critical|High|Medium|Low|Info",
           "suggestion": "Specific instructions on how to fix it",
-          "before_code": "Language-specific suboptimal code snippet",
+          "before_code": "EXACT COPY of the source code line from the file at the reported line number",
           "after_code": "Language-specific optimized/corrected code example"
         }
       ],
@@ -213,7 +312,7 @@ def review_files_combined(
 ) -> tuple[dict[str, dict], int, str | None, int, int, dict]:
     logger.info(f"Starting combined files review for {len(files_to_review)} files (repo: {repo_name})")
     
-    from backend.app.config import settings
+    from app.config import settings
     force_groq = settings.FORCE_GROQ_ANALYSIS
     if force_groq:
         logger.info("Cache bypass enabled via FORCE_GROQ_ANALYSIS=true")
@@ -280,7 +379,7 @@ def review_files_combined(
     requests_made = 0
     characters_sent = 0
     
-    active_model = model_name or "llama-3.3-70b-versatile"
+    active_model = model_name or MODEL_NAME
     token_stats = {
         "model_name": active_model,
         "prompt_tokens": 0,
@@ -328,7 +427,7 @@ def review_files_combined(
             result_text = ""
             
             for attempt in range(max_retries):
-                logger.info(f"Groq request start - Chunk {chunk_idx+1}/{len(chunks)}, attempt {attempt+1}/{max_retries} using model={active_model}")
+                logger.info(f"LLM request start - Chunk {chunk_idx+1}/{len(chunks)}, attempt {attempt+1}/{max_retries} using model={active_model}")
                 try:
                     start_time = time.time()
                     chat_completion = client.chat.completions.create(
@@ -354,11 +453,11 @@ def review_files_combined(
                     break
                 except Exception as e:
                     err_msg_lower = str(e).lower()
-                    logger.warning(f"Groq request failure - Chunk {chunk_idx+1} attempt {attempt+1} failed: {e}")
+                    logger.warning(f"LLM request failure - Chunk {chunk_idx+1} attempt {attempt+1} failed: {e}")
                     is_quota_error = "429" in err_msg_lower or "rate_limit" in err_msg_lower or "quota" in err_msg_lower or "limit exceeded" in err_msg_lower
-                    if not is_quota_error and active_model == "llama-3.3-70b-versatile":
-                        logger.info("Non-quota error encountered. Falling back to llama-3.1-8b-instant.")
-                        active_model = "llama-3.1-8b-instant"
+                    if not is_quota_error and is_model_not_found_error(e) and active_model != GROQ_FALLBACK_MODEL:
+                        logger.info(f"Model '{active_model}' unavailable. Falling back to {GROQ_FALLBACK_MODEL}.")
+                        active_model = GROQ_FALLBACK_MODEL
                         token_stats["model_name"] = active_model
                         continue
                     if is_quota_error and attempt < max_retries - 1:
@@ -602,7 +701,7 @@ def review_pull_request(
         progress_callback(70, "generating_tests", "Generating test suggestions...", total_files, total_files, "")
 
     if progress_callback:
-        progress_callback(85, "generating_insights", "Generating insights with Groq...", total_files, total_files, "")
+        progress_callback(85, "generating_insights", "Generating insights with AI...", total_files, total_files, "")
 
     files_reviews_map, cache_hits, _, requests_made, characters_sent, token_stats = review_files_combined(
         client=client,
@@ -834,7 +933,7 @@ Code Snippet content:
             try:
                 chat_completion = client.chat.completions.create(
                     messages=[
-                        {"role": "system", "content": SYSTEM_SNIPPET_REVIEW_PROMPT},
+                        {"role": "system", "content": SYSTEM_COMBINED_PROMPT},
                         {"role": "user", "content": user_prompt}
                     ],
                     model=active_model,
@@ -846,8 +945,9 @@ Code Snippet content:
             except Exception as e:
                 err_msg_lower = str(e).lower()
                 is_quota_error = "429" in err_msg_lower or "rate_limit" in err_msg_lower or "quota" in err_msg_lower or "limit exceeded" in err_msg_lower
-                if not is_quota_error and active_model == "llama-3.3-70b-versatile":
-                    active_model = "llama-3.1-8b-instant"
+                if not is_quota_error and is_model_not_found_error(e) and active_model != GROQ_FALLBACK_MODEL:
+                    logger.info(f"Model '{active_model}' unavailable. Falling back to {GROQ_FALLBACK_MODEL}.")
+                    active_model = GROQ_FALLBACK_MODEL
                     continue
                 if is_quota_error and attempt < max_retries - 1:
                     time.sleep(backoff)
@@ -1102,9 +1202,24 @@ def review_entire_repository(
     characters_analyzed_count = characters_sent
 
     for filename, res_dict in files_reviews_map.items():
+        # ── Get source lines for evidence validation ──
+        source_content = ""
+        for f in files_to_review:
+            if f["filename"] == filename:
+                source_content = f.get("content", f.get("truncated_content", ""))
+                break
+        source_lines = source_content.splitlines() if source_content else []
+        validated_count = 0
+        rejected_count = 0
+
         general_issues = []
         for item in res_dict.get("inline_comments", []):
             if isinstance(item, dict):
+                if source_lines and not validate_finding_evidence(item, source_lines):
+                    rejected_count += 1
+                    logger.info(f"Rejected LLM finding (no evidence): {filename}:{item.get('line')} - {item.get('issue','')[:60]}")
+                    continue
+                validated_count += 1
                 general_issues.append({
                     "file": filename,
                     "line": int(item.get("line", 1)) if str(item.get("line")).isdigit() else 1,
@@ -1121,6 +1236,11 @@ def review_entire_repository(
         security_issues = []
         for item in res_dict.get("security_findings", []):
             if isinstance(item, dict):
+                if source_lines and not validate_finding_evidence(item, source_lines):
+                    rejected_count += 1
+                    logger.info(f"Rejected LLM security finding (no evidence): {filename}:{item.get('line')} - {item.get('issue','')[:60]}")
+                    continue
+                validated_count += 1
                 security_issues.append({
                     "file": filename,
                     "line": int(item.get("line", 1)) if str(item.get("line")).isdigit() else 1,
@@ -1137,6 +1257,11 @@ def review_entire_repository(
         smell_issues = []
         for item in res_dict.get("code_smells", []):
             if isinstance(item, dict):
+                if source_lines and not validate_finding_evidence(item, source_lines):
+                    rejected_count += 1
+                    logger.info(f"Rejected LLM smell finding (no evidence): {filename}:{item.get('line')} - {item.get('issue','')[:60]}")
+                    continue
+                validated_count += 1
                 smell_issues.append({
                     "file": filename,
                     "line": int(item.get("line", 1)) if str(item.get("line")).isdigit() else 1,
@@ -1150,6 +1275,59 @@ def review_entire_repository(
                     "after_code": item.get("after_code", ""),
                 })
 
+        # ── Run static scanners to supplement/correct LLM findings ──
+        # Detect language from file extension
+        ext = os.path.splitext(filename)[1].lower()
+        lang_ext_map = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
+                         ".jsx": "JavaScript", ".tsx": "TypeScript", ".java": "Java",
+                         ".go": "Go", ".rb": "Ruby", ".php": "PHP"}
+        detected_lang = lang_ext_map.get(ext, "Python")
+        static_results = apply_static_scanners(filename, source_content, detected_lang)
+        static_sec = static_results.get("security_findings", [])
+        static_smells = static_results.get("code_smells", [])
+
+        # Merge static findings (avoid duplicates with LLM findings)
+        llm_keys = set()
+        for f in security_issues + smell_issues:
+            llm_keys.add((f["line"], f["issue"][:60]))
+
+        for sf in static_sec:
+            key = (sf["line"], sf["issue"][:60])
+            if key not in llm_keys:
+                llm_keys.add(key)
+                security_issues.append({
+                    "file": filename,
+                    "line": sf["line"],
+                    "severity": sf.get("severity", "Medium"),
+                    "category": "Security",
+                    "issue": sf["issue"],
+                    "suggestion": sf.get("suggestion", ""),
+                    "why_it_matters": sf.get("why_it_matters", sf["issue"]),
+                    "risk_level": sf.get("risk_level", sf.get("severity", "Medium")),
+                    "before_code": sf.get("before_code", ""),
+                    "after_code": sf.get("after_code", ""),
+                })
+                validated_count += 1
+
+        for sf in static_smells:
+            key = (sf["line"], sf["issue"][:60])
+            if key not in llm_keys:
+                llm_keys.add(key)
+                smell_issues.append({
+                    "file": filename,
+                    "line": sf["line"],
+                    "severity": sf.get("severity", "Medium"),
+                    "category": "Code Smell",
+                    "issue": sf["issue"],
+                    "suggestion": sf.get("suggestion", ""),
+                    "why_it_matters": sf.get("why_it_matters", sf["issue"]),
+                    "risk_level": sf.get("risk_level", sf.get("severity", "Medium")),
+                    "before_code": sf.get("before_code", ""),
+                    "after_code": sf.get("after_code", ""),
+                })
+                validated_count += 1
+
+        logger.info(f"Evidence validation for {filename}: {validated_count} accepted, {rejected_count} rejected (hallucinations), static: {len(static_sec)}+{len(static_smells)}")
         all_findings.extend(security_issues + smell_issues + general_issues)
 
         if len(test_suggestions_by_file) < 1 and res_dict.get("test_suggestions"):

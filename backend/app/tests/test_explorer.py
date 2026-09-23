@@ -1,12 +1,12 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from uuid import uuid4
-from backend.app.models.models import Repository
-from backend.app.database.database import SessionLocal
+from app.models.models import Repository
+from app.database.database import SessionLocal
 
 def get_auth_headers(client):
     email = "testexplorer@example.com"
-    password = "secretpassword"
+    password = "SecretPass123"
     client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password}
@@ -18,8 +18,8 @@ def get_auth_headers(client):
     token = login_resp.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
 
-@patch("backend.app.routers.explorer.GitHubService")
-@patch("backend.app.routers.repositories.GitHubService")
+@patch("app.routers.explorer.GitHubService")
+@patch("app.routers.repositories.GitHubService")
 def test_explorer_endpoints_flow(mock_gh_repo, mock_gh_explorer, client):
     headers = get_auth_headers(client)
     
@@ -101,7 +101,7 @@ def test_explorer_endpoints_flow(mock_gh_repo, mock_gh_explorer, client):
     }
     
     # Call POST /repositories/{id}/files
-    with patch("backend.app.routers.explorer.run_analysis_task") as mock_celery_task:
+    with patch("app.routers.explorer.enqueue_analysis_task") as mock_celery_task:
         save_resp = client.post(
             f"/api/v1/repositories/{repo_id}/files",
             json={
@@ -114,4 +114,4 @@ def test_explorer_endpoints_flow(mock_gh_repo, mock_gh_explorer, client):
         assert save_resp.status_code == 200
         assert save_resp.json()["success"] is True
         assert "analysis_id" in save_resp.json()
-        assert mock_celery_task.delay.called is True
+        assert mock_celery_task.called is True

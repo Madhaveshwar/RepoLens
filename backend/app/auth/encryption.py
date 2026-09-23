@@ -1,5 +1,5 @@
 from cryptography.fernet import Fernet
-from backend.app.config import settings
+from app.config import settings
 
 class Encryptor:
     def __init__(self):

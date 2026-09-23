@@ -46,7 +46,7 @@ services:
       - .env
     command: >
       sh -c "alembic -c alembic.ini upgrade head &&
-             uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 1"
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1"
     volumes:
       - reports_storage:/backend/storage
     ports:
@@ -100,7 +100,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    command: celery -A backend.app.tasks.tasks.celery_app worker --loglevel=info --concurrency=2 -Q celery,dead_letter
+    command: celery -A app.tasks.tasks.celery_app worker --loglevel=info --concurrency=2 -Q celery,dead_letter
     volumes:
       - reports_storage:/backend/storage
     environment:

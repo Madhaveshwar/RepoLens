@@ -2,7 +2,7 @@
 import json
 from fastapi import WebSocket, WebSocketDisconnect
 import redis.asyncio as aioredis
-from backend.app.config import settings
+from app.config import settings
 
 class ConnectionManager:
     def __init__(self):
@@ -37,7 +37,8 @@ async def listen_to_redis_channel(analysis_id: str, websocket: WebSocket):
         return
     
     try:
-        last_heartbeat = 0.0
+        loop = asyncio.get_event_loop()
+        last_heartbeat = loop.time()
         while True:
             # Check for new messages from Redis
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
@@ -51,10 +52,10 @@ async def listen_to_redis_channel(analysis_id: str, websocket: WebSocket):
                 if data_dict.get("progress") == 100 or "failed" in data_dict.get("status", "").lower():
                     await websocket.close()
                     break
-                last_heartbeat = now  # Reset heartbeat timer after real message
+                last_heartbeat = loop.time()  # Reset heartbeat timer after real message
             
-            # Send heartbeat every ~6s only if no progress message arrived
-            now = asyncio.get_event_loop().time()
+            # Send heartbeat every ~5s only if no progress message arrived
+            now = loop.time()
             if now - last_heartbeat >= 5.0:
                 try:
                     await websocket.send_text(_json.dumps({"type": "heartbeat"}))

@@ -2,13 +2,14 @@ import os
 import re
 from typing import Any
 from langsmith import traceable
-from backend.app.utils.prompts import SYSTEM_REPO_PROMPT, build_repo_prompt
-from backend.app.utils.validation import should_skip_file
-from backend.app.utils.logger import get_logger
+from app.utils.prompts import SYSTEM_REPO_PROMPT, build_repo_prompt
+from app.utils.validation import should_skip_file
+from app.utils.logger import get_logger
+from app.services.llm_client import GROQ_FALLBACK_MODEL
 
 logger = get_logger("repository_analyzer")
 
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "openai/gpt-oss-120b"
 
 @traceable(name="Repository Health Analysis")
 def analyze_repository(
@@ -174,7 +175,7 @@ def analyze_repository(
     health_score = max(0, score)
     logger.info(f"Calculated health score: {health_score}, Deductions: {deductions}")
 
-    from backend.app.config import settings
+    from app.config import settings
     force_groq = settings.FORCE_GROQ_ANALYSIS
 
     if qualitative_report == "PENDING":
@@ -196,7 +197,7 @@ def analyze_repository(
             doc_coverage=doc_coverage,
         )
 
-        active_model = "llama-3.3-70b-versatile"
+        active_model = MODEL_NAME
         try:
             chat_completion = client.chat.completions.create(
                 messages=[
@@ -211,26 +212,26 @@ def analyze_repository(
         except Exception as e:
             logger.warning(f"Failed to generate repo report with model {active_model}: {e}")
             err_str = str(e).lower()
-            if active_model == "llama-3.3-70b-versatile" and "quota" not in err_str and "429" not in err_str:
+            if active_model == MODEL_NAME and "quota" not in err_str and "429" not in err_str:
                 try:
-                    logger.info("Attempting fallback to model: llama-3.1-8b-instant")
+                    logger.info(f"Attempting fallback to model: {GROQ_FALLBACK_MODEL}")
                     chat_completion = client.chat.completions.create(
                         messages=[
                             {"role": "system", "content": SYSTEM_REPO_PROMPT},
                             {"role": "user", "content": prompt}
                         ],
-                        model="llama-3.1-8b-instant",
+                        model=GROQ_FALLBACK_MODEL,
                         temperature=temperature,
                     )
                     analysis_report = chat_completion.choices[0].message.content
                     logger.info("Successfully fetched qualitative report using fallback model.")
                 except Exception as fallback_e:
                     logger.error("Fallback repository report query failed.", exc_info=True)
-                    from backend.app.services.reviewer import handle_groq_error
+                    from app.services.reviewer import handle_groq_error
                     raise handle_groq_error(fallback_e)
             else:
                 logger.error("Groq API repository report query failed.", exc_info=True)
-                from backend.app.services.reviewer import handle_groq_error
+                from app.services.reviewer import handle_groq_error
                 raise handle_groq_error(e)
 
     directory_groups = {}

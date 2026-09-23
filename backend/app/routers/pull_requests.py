@@ -4,13 +4,13 @@ from sqlalchemy import select
 from typing import List, Dict, Any
 import uuid
 
-from backend.app.database.database import get_async_db
-from backend.app.models.models import User, PullRequest, Repository, Analysis, SecurityFinding, CodeSmell
-from backend.app.schemas.schemas import PullRequestOut
-from backend.app.auth.security import get_current_user
-from backend.app.auth.encryption import encryptor
-from backend.app.services.github_service import GitHubService
-from backend.app.config import settings
+from app.database.database import get_async_db
+from app.models.models import User, PullRequest, Repository, Analysis, SecurityFinding, CodeSmell
+from app.schemas.schemas import PullRequestOut
+from app.auth.security import get_current_user
+from app.auth.encryption import encryptor
+from app.services.github_service import GitHubService
+from app.config import settings
 
 router = APIRouter(prefix="/pull-requests", tags=["Pull Requests"])
 
@@ -200,7 +200,7 @@ async def post_review_to_github_api(
     summary_body += f"- **Risk Score:** {latest_analysis.risk_score}/100\n"
     summary_body += f"- **Security Issues Count:** {len([x for x in inline_comments if 'Security' in x['body']])}\n"
     summary_body += f"- **Maintainability Issues Count:** {len([x for x in inline_comments if 'Quality' in x['body']])}\n"
-    summary_body += f"\n*Review generated automatically by AI Code Reviewer full-stack dashboard.*"
+    summary_body += f"\n*Review generated automatically by RepoLens AI full-stack dashboard.*"
     
     github_service.post_comment(repo.name, pr.number, summary_body)
     

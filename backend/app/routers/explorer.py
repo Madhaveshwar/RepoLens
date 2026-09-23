@@ -5,14 +5,14 @@ from pydantic import BaseModel
 import uuid
 import os
 
-from backend.app.database.database import get_async_db
-from backend.app.models.models import User, Repository, Analysis
-from backend.app.auth.security import get_current_user
-from backend.app.auth.encryption import encryptor
-from backend.app.services.github_service import GitHubService
-from backend.app.tasks.tasks import run_analysis_task
-from backend.app.config import settings
-from backend.app.utils.logger import get_logger
+from app.database.database import get_async_db
+from app.models.models import User, Repository, Analysis
+from app.auth.security import get_current_user
+from app.auth.encryption import encryptor
+from app.services.github_service import GitHubService
+from app.tasks.tasks import enqueue_analysis_task
+from app.config import settings
+from app.utils.logger import get_logger
 
 logger = get_logger("explorer_router")
 
@@ -99,6 +99,9 @@ async def get_file_content(
     db: AsyncSession = Depends(get_async_db)
 ):
     logger.info(f"User {current_user.id} requested file content: {path} for repository: {id}")
+    if not path or not path.strip():
+        raise HTTPException(status_code=400, detail="File path is required.")
+    
     result = await db.execute(
         select(Repository).where((Repository.id == id) & (Repository.user_id == current_user.id))
     )
@@ -113,7 +116,11 @@ async def get_file_content(
     try:
         github_service = GitHubService(token=pat)
         content = github_service.get_file_content(repo.name, path, ref=repo.default_branch)
+        if not content:
+            raise HTTPException(status_code=404, detail=f"File '{path}' not found on branch '{repo.default_branch}'.")
         return {"content": content, "path": path}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to download file content for {path}: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Failed to download file: {str(e)}")
@@ -157,7 +164,20 @@ async def save_file_content(
         )
         logger.info(f"Committed save to {req.path} directly to branch {repo.default_branch}")
         
-        # Trigger background analysis re-scan immediately to update findings
+        # Trigger background analysis re-scan only if no scan is currently running
+        running_scan = await db.execute(
+            select(Analysis).where(
+                (Analysis.repository_id == repo.id) &
+                (Analysis.status.in_(["pending", "running"])) &
+                ((Analysis.is_deleted == False) | (Analysis.is_deleted.is_(None)))
+            )
+        )
+        existing_running = running_scan.scalars().first()
+        
+        if existing_running:
+            logger.info(f"Re-scan skipped — analysis {existing_running.id} is already running for repo {repo.id}")
+            return {"success": True, "analysis_id": str(existing_running.id), "note": "scan_already_running"}
+        
         new_analysis = Analysis(
             repository_id=repo.id,
             pull_request_id=None,
@@ -170,22 +190,17 @@ async def save_file_content(
         await db.refresh(new_analysis)
         
         try:
-            run_analysis_task.delay(str(new_analysis.id))
+            enqueue_analysis_task(background_tasks, str(new_analysis.id))
             logger.info(f"Re-scan analysis queued successfully: {new_analysis.id}")
         except Exception as queue_err:
-            logger.warning(f"Failed to queue re-scan Celery analysis task {new_analysis.id}, falling back to FastAPI BackgroundTasks: {queue_err}")
-            try:
-                background_tasks.add_task(run_analysis_task, None, str(new_analysis.id))
-                logger.info(f"Successfully enqueued re-scan analysis task {new_analysis.id} via BackgroundTasks fallback.")
-            except Exception as bg_err:
-                logger.error(f"Failed to queue background re-scan analysis task {new_analysis.id} even with fallback: {bg_err}", exc_info=True)
-                new_analysis.status = "failed"
-                new_analysis.progress = 100
-                new_analysis.insights = f"Failed to queue background re-scan task: {bg_err}"
-                db.add(new_analysis)
-                await db.commit()
+            logger.error(f"Failed to queue re-scan analysis task {new_analysis.id}: {queue_err}", exc_info=True)
+            new_analysis.status = "failed"
+            new_analysis.progress = 100
+            new_analysis.insights = f"Failed to queue re-scan task: {queue_err}"
+            db.add(new_analysis)
+            await db.commit()
         
-        return {"success": True, "analysis_id": str(new_analysis.id)}
+        return {"success": True, "analysis_id": str(new_analysis.id), "note": "scan_queued"}
     except Exception as e:
         logger.error(f"Commit save failed for file {req.path}: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Failed to commit changes to GitHub: {str(e)}")

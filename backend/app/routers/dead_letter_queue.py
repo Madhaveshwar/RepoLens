@@ -1,16 +1,16 @@
 import uuid
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Depends, Query, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
-from backend.app.database.database import get_async_db
-from backend.app.models.models import User, DeadLetterTask, Analysis, Repository
-from backend.app.schemas.schemas import DeadLetterTaskOut
-from backend.app.auth.security import get_current_user
-from backend.app.tasks.tasks import run_analysis_task
-from backend.app.utils.audit import log_audit_event
-from backend.app.utils.logger import get_logger
+from app.database.database import get_async_db
+from app.models.models import User, DeadLetterTask, Analysis, Repository
+from app.schemas.schemas import DeadLetterTaskOut
+from app.auth.security import get_current_user
+from app.tasks.tasks import enqueue_analysis_task
+from app.utils.audit import log_audit_event
+from app.utils.logger import get_logger
 
 logger = get_logger("dlq_router")
 router = APIRouter(prefix="/dead-letter-queue", tags=["dead-letter-queue"])
@@ -70,6 +70,7 @@ async def get_dlq_tasks(
 @router.post("/{task_id}/retry", response_model=DeadLetterTaskOut)
 async def retry_dlq_task(
     task_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db)
 ):
@@ -113,8 +114,8 @@ async def retry_dlq_task(
     await db.commit()
     await db.refresh(dlq_task)
     
-    # Dispatch to Celery
-    run_analysis_task.delay(str(analysis.id))
+    # Dispatch analysis task (Celery if available, else BackgroundTasks)
+    enqueue_analysis_task(background_tasks, str(analysis.id))
     
     await log_audit_event(
         db=db,

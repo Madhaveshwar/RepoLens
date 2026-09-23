@@ -1,11 +1,3 @@
-# ── Existing project-specific ignores ──
-*.pdf
-.reviewer_cache.json
-ai_code_reviewer/.reviewer_cache.json
-exports/
-ai_code_reviewer/exports/
-0.47.0
-
 # ── Environment ──
 .env
 .env.*
@@ -21,6 +13,7 @@ ai_code_reviewer/exports/
 .coverage
 .coverage.*
 htmlcov/
+coverage/
 
 # ── Generated Report Artifacts ──
 backend/storage/
@@ -42,6 +35,7 @@ env/
 # ── Node / Frontend Build ──
 node_modules/
 dist/
+dist_old/
 build/
 .next/
 .vercel/
@@ -64,3 +58,11 @@ temp/
 
 # ── Docker Volumes (local) ──
 pgdata/
+redis_data/
+
+# ── Project-specific ──
+.reviewer_cache.json
+exports/
+0.47.0
+*.pdf
+storage/

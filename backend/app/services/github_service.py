@@ -1,6 +1,6 @@
 import re
 from github import Github
-from backend.app.utils.logger import get_logger
+from app.utils.logger import get_logger
 
 logger = get_logger("github_service")
 
@@ -26,7 +26,7 @@ class GitHubService:
     def __init__(self, token: str | None = None):
         import os
         from github import GithubIntegration
-        from backend.app.config import settings
+        from app.config import settings
         
         self.token = token.strip() if token else None
         self.integration = None
@@ -53,14 +53,16 @@ class GitHubService:
                 
         logger.info(f"Initializing GitHubService (has_token: {bool(self.token)}, has_app_integration: {bool(self.integration)})")
         if self.token:
-            self.client = Github(self.token)
+            from github import Auth
+            self.client = Github(auth=Auth.Token(self.token))
         else:
             self.client = Github()
 
     def get_client_for_repo(self, repo_name: str) -> Github:
         """Get an authenticated Github client for a specific repository."""
         if self.token:
-            return Github(self.token)
+            from github import Auth
+            return Github(auth=Auth.Token(self.token))
         if self.integration:
             try:
                 parts = repo_name.split("/")
@@ -326,3 +328,36 @@ class GitHubService:
         except Exception as exc:
             logger.error(f"Error posting inline comments: {exc}", exc_info=True)
             return 0, len(inline_comments)
+
+    def create_branch(self, repo_name: str, branch_name: str, source_branch: str = "main") -> dict[str, object]:
+        """Create a new branch on the repository from a source branch."""
+        logger.info(f"Creating branch '{branch_name}' from '{source_branch}' on {repo_name}")
+        try:
+            client = self.get_client_for_repo(repo_name)
+            repo = client.get_repo(repo_name)
+            source_ref = repo.get_git_ref(f"heads/{source_branch}")
+            repo.create_git_ref(f"refs/heads/{branch_name}", source_ref.object.sha)
+            logger.info(f"Branch '{branch_name}' created successfully on {repo_name}")
+            return {"success": True, "branch": branch_name, "sha": source_ref.object.sha}
+        except Exception as e:
+            logger.error(f"Failed to create branch '{branch_name}' on {repo_name}: {e}", exc_info=True)
+            raise ValueError(f"Failed to create branch: {str(e)}")
+
+    def create_pull_request(self, repo_name: str, title: str, body: str, head: str, base: str = "main") -> dict[str, object]:
+        """Create a pull request on the repository."""
+        logger.info(f"Creating PR '{title}' ({head} -> {base}) on {repo_name}")
+        try:
+            client = self.get_client_for_repo(repo_name)
+            repo = client.get_repo(repo_name)
+            pr = repo.create_pull(title=title, body=body, head=head, base=base)
+            logger.info(f"PR #{pr.number} created successfully on {repo_name}")
+            return {
+                "success": True,
+                "pr_number": pr.number,
+                "pr_url": pr.html_url,
+                "title": pr.title,
+                "state": pr.state
+            }
+        except Exception as e:
+            logger.error(f"Failed to create PR on {repo_name}: {e}", exc_info=True)
+            raise ValueError(f"Failed to create pull request: {str(e)}")

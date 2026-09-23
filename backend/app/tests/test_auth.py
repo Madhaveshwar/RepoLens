@@ -6,7 +6,7 @@ def test_read_root(client):
 def test_register_and_login(client):
     # Register
     email = "test@example.com"
-    password = "secretpassword"
+    password = "SecretPass123"
     reg_response = client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password}
@@ -28,7 +28,7 @@ def test_register_and_login(client):
 
 
 def test_password_hashing_and_verification():
-    from backend.app.auth.security import get_password_hash, verify_password
+    from app.auth.security import get_password_hash, verify_password
     plain_password = "my_super_secret_pass_123"
     hashed = get_password_hash(plain_password)
     

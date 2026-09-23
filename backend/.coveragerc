@@ -1,6 +1,0 @@
-[run]
-branch = True
-concurrency =
-    thread
-    greenlet
-source = app

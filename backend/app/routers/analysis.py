@@ -1,26 +1,49 @@
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from typing import List
 import uuid
+import os
+import ast
+import time
+import json
+import re
 from pydantic import BaseModel
 
-from backend.app.database.database import get_async_db
-from backend.app.models.models import (
+from app.database.database import get_async_db
+from app.models.models import (
     User, Repository, PullRequest, Analysis,
-    Report, SecurityFinding, CodeSmell, TestSuggestion
+    Report, SecurityFinding, CodeSmell, TestSuggestion, HealthScore
 )
-from backend.app.schemas.schemas import AnalysisTrigger, AnalysisOut, SnippetReviewRequest, SnippetReviewOut
-from backend.app.auth.security import get_current_user
-from backend.app.tasks.tasks import run_analysis_task
-from backend.app.websockets.websocket_manager import manager, listen_to_redis_channel
-from backend.app.services.reviewer import review_single_code_snippet, build_groq_client
-from backend.app.services.llm_client import build_llm_client, get_model_name
-from backend.app.auth.encryption import encryptor
-from backend.app.config import settings
-from backend.app.utils.logger import get_logger
+from app.schemas.schemas import AnalysisTrigger, AnalysisOut, FixFindingRequest, FixFindingResponse
+from app.auth.security import get_current_user
+from app.tasks.tasks import enqueue_analysis_task
+from app.websockets.websocket_manager import manager, listen_to_redis_channel
+from app.services.reviewer import review_single_code_snippet
+from app.services.llm_client import (
+    PROVIDER_FALLBACK_MODELS,
+    build_llm_client,
+    get_model_name,
+    friendly_llm_error,
+    is_auth_error,
+    is_model_not_found_error,
+    is_rate_limit_error,
+    create_chat_completion,
+)
+from app.auth.encryption import encryptor
+from app.config import settings
+from app.utils.logger import get_logger
 
 logger = get_logger("analysis_router")
+
+
+def _raise_friendly_llm_error(provider: str, exc: Exception) -> HTTPException:
+    """Wrap any LLM provider exception into a clear, user-facing HTTP error."""
+    logger.error(f"LLM request failed (provider={provider}): {exc}", exc_info=True)
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=friendly_llm_error(provider, exc),
+    )
 
 router = APIRouter(prefix="/analysis", tags=["Analysis"])
 
@@ -51,7 +74,7 @@ async def trigger_analysis(
             detail="GitHub PAT credentials not configured. Please add your personal access token in Settings first."
         )
     try:
-        from backend.app.services.github_service import GitHubService
+        from app.services.github_service import GitHubService
         github_service = GitHubService(token=pat)
         # Check permissions
         gh_repo = github_service.client.get_repo(repo.name)
@@ -94,26 +117,21 @@ async def trigger_analysis(
     await db.commit()
     await db.refresh(new_analysis)
     
-    logger.info(f"Created analysis record with id: {new_analysis.id}. Queueing Celery task.")
+    logger.info(f"Created analysis record with id: {new_analysis.id}. Queueing analysis task.")
     try:
-        run_analysis_task.delay(str(new_analysis.id))
+        enqueue_analysis_task(background_tasks, str(new_analysis.id))
     except Exception as exc:
-        logger.warning(f"Failed to queue Celery analysis task {new_analysis.id}, falling back to FastAPI BackgroundTasks: {exc}")
-        try:
-            background_tasks.add_task(run_analysis_task, None, str(new_analysis.id))
-            logger.info(f"Successfully enqueued analysis task {new_analysis.id} via BackgroundTasks fallback.")
-        except Exception as bg_err:
-            logger.error(f"Failed to queue background analysis task {new_analysis.id} even with fallback: {bg_err}", exc_info=True)
-            new_analysis.status = "failed"
-            new_analysis.progress = 100
-            new_analysis.insights = f"Failed to queue background analysis task: {bg_err}"
-            db.add(new_analysis)
-            await db.commit()
-            await db.refresh(new_analysis)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Analysis worker queue is unavailable and background fallback failed: {str(bg_err)}"
-            )
+        logger.error(f"Failed to enqueue analysis task {new_analysis.id}: {exc}", exc_info=True)
+        new_analysis.status = "failed"
+        new_analysis.progress = 100
+        new_analysis.insights = f"Failed to queue analysis task: {exc}"
+        db.add(new_analysis)
+        await db.commit()
+        await db.refresh(new_analysis)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Analysis worker queue is unavailable: {str(exc)}"
+        )
     
     return new_analysis
 
@@ -167,6 +185,15 @@ async def get_analysis(
     analysis = result.scalars().first()
     if not analysis:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found.")
+    
+    # Fetch associated health score from HealthScore table for data consistency
+    health_res = await db.execute(
+        select(HealthScore).where(HealthScore.analysis_id == id)
+    )
+    health_obj = health_res.scalars().first()
+    if health_obj:
+        analysis.health_score = health_obj.health_score
+    
     return analysis
 
 @router.get("/repo/{repo_id}", response_model=List[AnalysisOut])
@@ -189,17 +216,25 @@ async def list_repo_analyses(
         .where((Analysis.repository_id == repo_id) & ((Analysis.is_deleted == False) | (Analysis.is_deleted.is_(None))))
         .order_by(Analysis.timestamp.desc())
     )
-    return result.scalars().all()
+    analyses = list(result.scalars().all())
+    
+    # Fetch health scores for all analyses in a single query
+    if analyses:
+        analysis_ids = [a.id for a in analyses]
+        health_res = await db.execute(
+            select(HealthScore).where(HealthScore.analysis_id.in_(analysis_ids))
+        )
+        health_scores = health_res.scalars().all()
+        health_map = {hs.analysis_id: hs.health_score for hs in health_scores}
+        for a in analyses:
+            if a.id in health_map:
+                a.health_score = health_map[a.id]
+    
+    return analyses
 
-@router.post("/snippet", response_model=SnippetReviewOut)
-async def review_snippet(
-    req: SnippetReviewRequest,
-    current_user: User = Depends(get_current_user)
-):
-    logger.info(f"User {current_user.id} requested inline snippet review (language: {req.language})")
-
-    # Resolve provider and API key (respects user's Settings selection)
-    from backend.app.auth.encryption import encryptor as _enc
+def _resolve_llm_key(current_user: User) -> tuple[str, str]:
+    """Resolve provider and API key for a user, falling back to env vars."""
+    from app.auth.encryption import encryptor as _enc
     provider = (current_user.llm_default_provider or "groq").lower().strip()
     _key_map = {
         "groq":       current_user.groq_api_key_encrypted,
@@ -219,44 +254,60 @@ async def review_snippet(
     }
     enc_key = _key_map.get(provider)
     llm_api_key = _enc.decrypt(enc_key) if enc_key else _env_map.get(provider, "")
-    # Fallback to Groq if preferred provider has no key
     if not llm_api_key:
         provider = "groq"
         groq_enc = current_user.groq_api_key_encrypted
         llm_api_key = _enc.decrypt(groq_enc) if groq_enc else settings.GROQ_API_KEY
+    return provider, llm_api_key
 
-    if not llm_api_key:
-        logger.warning(f"Snippet review failed: No LLM API Key is configured for user {current_user.id}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No LLM API Key is configured for your profile. Add one in Settings."
-        )
 
+def validate_fix_syntax(code: str, file_path: str) -> tuple[bool, str]:
+    """Validate that generated fix code is syntactically correct.
+    Returns (is_valid, error_message)."""
+    ext = os.path.splitext(file_path)[1].lower()
+
+    # Python syntax check
+    if ext in ('.py', ''):
+        try:
+            ast.parse(code)
+            return True, "Syntax OK"
+        except SyntaxError as e:
+            return False, f"Python syntax error at line {e.lineno}: {e.msg}"
+
+    # JavaScript/TypeScript basic check - balanced braces
+    if ext in ('.js', '.ts', '.jsx', '.tsx'):
+        brace_count = code.count('{') - code.count('}')
+        paren_count = code.count('(') - code.count(')')
+        if brace_count != 0:
+            return False, f"Unbalanced braces: {brace_count} unmatched '{{' or '}}'"
+        if paren_count != 0:
+            return False, f"Unbalanced parentheses: {paren_count} unmatched '()' or ')'"
+        return True, "Syntax OK (brace/paren balance)"
+
+    # For other languages, do a basic sanity check
+    if not code.strip():
+        return False, "Empty code"
+
+    return True, "Syntax OK (basic check)"
+
+
+def validate_fix_imports(code: str) -> tuple[bool, str]:
+    """Validate that imports in generated fix are valid Python.
+    Returns (is_valid, warning_message)."""
     try:
-        logger.info(f"Building {provider} client for snippet review...")
-        client = build_llm_client(provider, llm_api_key)
-        results = review_single_code_snippet(req.code, req.language, client)
-        logger.info(f"Successfully reviewed snippet. Risk score: {results['risk_score']}")
-        return SnippetReviewOut(
-            risk_score=results["risk_score"],
-            findings=results["findings"],
-            test_suggestions=results["test_suggestions"],
-            severity_counts=results["severity_counts"],
-            latency_seconds=results["latency_seconds"],
-            scores=results["scores"],
-            is_valid_code=results["is_valid_code"],
-            detected_language=results["detected_language"],
-            optimization_required=results["optimization_required"],
-            optimized_code=results["optimized_code"],
-            quality_score=results["quality_score"],
-            validation_message=results["validation_message"]
-        )
-    except Exception as e:
-        logger.error(f"Snippet review execution failed: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Snippet review failed: {str(e)}"
-        )
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if not alias.name or not alias.name.replace('_', '').replace('.', '').isalnum():
+                        return False, f"Suspicious import: {alias.name}"
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and not node.module.replace('_', '').replace('.', '').isalnum():
+                    return False, f"Suspicious from-import: {node.module}"
+        return True, "Imports OK"
+    except SyntaxError:
+        return True, "Cannot validate imports (syntax error)"
+
 
 @router.websocket("/ws/{analysis_id}")
 async def websocket_analysis_progress(websocket: WebSocket, analysis_id: str):
@@ -270,10 +321,7 @@ async def websocket_analysis_progress(websocket: WebSocket, analysis_id: str):
         print(f"WS Exception: {e}")
         manager.disconnect(websocket)
 
-import os
-from sqlalchemy import delete, func
-
-from backend.app.schemas.schemas import ValidateFixRequest, ValidateFixResponse, DeployInstructionsRequest, DeployInstructionsResponse
+from app.schemas.schemas import ValidateFixRequest, ValidateFixResponse, ValidateFixCodeRequest, ValidateFixCodeResponse, RescanVerifyRequest, RescanVerifyResponse
 
 analyses_router = APIRouter(prefix="/analyses", tags=["Analyses"])
 
@@ -305,13 +353,17 @@ async def validate_fix(
     }
     language = lang_map.get(ext, "Unknown")
 
-    groq_key = encryptor.decrypt(current_user.groq_api_key_encrypted) if current_user.groq_api_key_encrypted else settings.GROQ_API_KEY
-    if not groq_key:
-        raise HTTPException(status_code=400, detail="Groq API Key is not configured for your profile.")
+    provider, llm_api_key = _resolve_llm_key(current_user)
+    if not llm_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No LLM API Key is configured for your profile. Add one in Settings."
+        )
 
     try:
-        from backend.app.services.reviewer import review_single_code_snippet, build_groq_client
-        client = build_groq_client(groq_key)
+        from app.services.reviewer import review_single_code_snippet
+        from app.services.llm_client import build_llm_client
+        client = build_llm_client(provider, llm_api_key)
         results = review_single_code_snippet(req.edited_content, language, client)
         
         remaining = []
@@ -346,68 +398,137 @@ async def validate_fix(
         raise HTTPException(status_code=500, detail=f"Validate fix failed: {str(e)}")
 
 
-@router.post("/deploy-instructions", response_model=DeployInstructionsResponse)
-async def get_deploy_instructions(
-    req: DeployInstructionsRequest,
+@router.post("/validate-fix-code", response_model=ValidateFixCodeResponse)
+async def validate_fix_code(
+    req: ValidateFixCodeRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Validate generated fix code for syntax errors and import issues.
+    This is a fast static check (no LLM call).
+    """
+    syntax_ok, syntax_error = validate_fix_syntax(req.code, req.file_path)
+    imports_ok, imports_error = validate_fix_imports(req.code)
+    
+    overall_valid = syntax_ok and imports_ok
+    
+    return ValidateFixCodeResponse(
+        syntax_ok=syntax_ok,
+        syntax_error=syntax_error if not syntax_ok else "",
+        imports_ok=imports_ok,
+        imports_error=imports_error if not imports_ok else "",
+        overall_valid=overall_valid
+    )
+
+
+@router.post("/compare-and-resolve", response_model=RescanVerifyResponse)
+async def compare_and_resolve(
+    req: RescanVerifyRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db)
 ):
-    """Generate AI-powered deployment instructions for fixing issues found in an analysis."""
-    # Verify ownership
-    result = await db.execute(
+    """
+    Compare two analyses (original scan vs rescan) and optionally mark resolved findings.
+    This is used after fixes are applied to verify which findings were resolved.
+    """
+    # Verify ownership of both analyses
+    res_a = await db.execute(
         select(Analysis)
         .join(Repository)
-        .where((Analysis.id == req.analysis_id) & (Repository.user_id == current_user.id))
+        .where((Analysis.id == req.original_analysis_id) & (Repository.user_id == current_user.id))
     )
-    analysis = result.scalars().first()
-    if not analysis:
-        raise HTTPException(status_code=404, detail="Analysis not found.")
-        
-    # Get repository info
-    repo_res = await db.execute(select(Repository).where(Repository.id == analysis.repository_id))
-    repo = repo_res.scalars().first()
+    analysis_a = res_a.scalars().first()
     
-    # Count findings
-    sec_count_res = await db.execute(
-        select(func.count(SecurityFinding.id)).where(SecurityFinding.analysis_id == analysis.id)
+    res_b = await db.execute(
+        select(Analysis)
+        .join(Repository)
+        .where((Analysis.id == req.rescan_analysis_id) & (Repository.user_id == current_user.id))
     )
-    sec_count = sec_count_res.scalar() or 0
-    
-    smell_count_res = await db.execute(
-        select(func.count(CodeSmell.id)).where(CodeSmell.analysis_id == analysis.id)
+    analysis_b = res_b.scalars().first()
+
+    if not analysis_a or not analysis_b:
+        raise HTTPException(status_code=404, detail="One or both scans not found or access denied.")
+
+    # Fetch findings for both scans
+    sec_a = (await db.execute(select(SecurityFinding).where(SecurityFinding.analysis_id == req.original_analysis_id))).scalars().all()
+    sec_b = (await db.execute(select(SecurityFinding).where(SecurityFinding.analysis_id == req.rescan_analysis_id))).scalars().all()
+    smell_a = (await db.execute(select(CodeSmell).where(CodeSmell.analysis_id == req.original_analysis_id))).scalars().all()
+    smell_b = (await db.execute(select(CodeSmell).where(CodeSmell.analysis_id == req.rescan_analysis_id))).scalars().all()
+
+    def serialize_finding(f, f_type):
+        return {
+            "id": str(f.id),
+            "file": f.file,
+            "line": f.line,
+            "severity": f.severity,
+            "issue": f.issue,
+            "type": f_type,
+            "risk_level": getattr(f, "risk_level", None),
+            "suggestion": f.suggestion,
+        }
+
+    # Build lookup dicts by (file, issue)
+    a_dict = {}
+    for f in sec_a:
+        a_dict[(f.file, f.issue)] = serialize_finding(f, "security")
+    for f in smell_a:
+        a_dict[(f.file, f.issue)] = serialize_finding(f, "code_smell")
+
+    b_dict = {}
+    for f in sec_b:
+        b_dict[(f.file, f.issue)] = serialize_finding(f, "security")
+    for f in smell_b:
+        b_dict[(f.file, f.issue)] = serialize_finding(f, "code_smell")
+
+    fixed = [a_dict[k] for k in a_dict if k not in b_dict]
+    new = [b_dict[k] for k in b_dict if k not in a_dict]
+    remaining = [b_dict[k] for k in b_dict if k in a_dict]
+
+    risk_a = analysis_a.risk_score or 0
+    risk_b = analysis_b.risk_score or 0
+
+    if risk_b < risk_a:
+        status = "improved"
+    elif risk_b > risk_a:
+        status = "regressed"
+    else:
+        status = "no_change"
+
+    # Optionally mark resolved findings by soft-deleting from original analysis
+    resolved_count = 0
+    if req.mark_resolved and fixed:
+        for f in sec_a:
+            key = (f.file, f.issue)
+            if key not in b_dict:
+                # Delete the finding so it no longer appears in queries
+                await db.delete(f)
+                resolved_count += 1
+        for f in smell_a:
+            key = (f.file, f.issue)
+            if key not in b_dict:
+                await db.delete(f)
+                resolved_count += 1
+        await db.commit()
+        logger.info(f"Resolved {resolved_count} findings from original scan {req.original_analysis_id}")
+
+    return RescanVerifyResponse(
+        original_analysis_id=str(req.original_analysis_id),
+        rescan_analysis_id=str(req.rescan_analysis_id),
+        status=status,
+        fixed_findings=fixed,
+        remaining_findings=remaining,
+        new_findings=new,
+        risk_score_before=risk_a,
+        risk_score_after=risk_b,
+        resolved_count=resolved_count,
+        unresolved_count=len(remaining)
     )
-    smell_count = smell_count_res.scalar() or 0
-    
-    total_findings = sec_count + smell_count
-    branch_name = req.branch if req.branch else "main"
-    
-    commit_msg = f"Fix security findings: Resolved {total_findings} issue(s) from AI code review"
-    pr_title = f"[AI Review] Fix {total_findings} code quality and security issue(s)"
-    pr_desc = (
-        f"## AI-Guided Code Remediation\n\n"
-        f"This PR addresses {total_findings} issue(s) identified by the AI Code Reviewer:\n\n"
-        f"- **Security Issues:** {sec_count}\n"
-        f"- **Code Smells:** {smell_count}\n\n"
-        f"### Steps Taken:\n"
-        f"1. Issues identified during automated repository scan\n"
-        f"2. Each issue reviewed and manually edited by the developer\n"
-        f"3. Changes validated via re-scan\n\n"
-        f"> **Note:** These changes were applied manually by the developer following AI guidance."
-    )
-    
-    steps = [
-        f"git add .",
-        f"git commit -m \"{commit_msg}\"",
-        f"git push origin {branch_name}",
-        f"# Then create a pull request on GitHub: {repo.name if repo else ''}"
-    ]
-    
-    return DeployInstructionsResponse(
-        steps=steps,
-        commit_suggestion=commit_msg,
-        pr_title_suggestion=pr_title,
-        pr_description_suggestion=pr_desc
-    )
+
+
+# [REMOVED] apply-fix endpoint — this project does not modify repositories
+
+
+# [REMOVED] deploy-instructions endpoint — this project does not modify repositories
 
 @analyses_router.delete("/{id}")
 async def delete_analysis(
@@ -499,7 +620,7 @@ async def get_analysis_stats(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found.")
         
     return {
-        "model_name": analysis.model_name or "llama-3.3-70b-versatile",
+        "model_name": analysis.model_name or "openai/gpt-oss-120b",
         "prompt_tokens": analysis.prompt_tokens or 0,
         "completion_tokens": analysis.completion_tokens or 0,
         "total_tokens": analysis.total_tokens or 0,
@@ -650,6 +771,178 @@ async def compare_analyses(
         "remaining": remaining
     }
 
+@router.post("/fix-finding", response_model=FixFindingResponse)
+async def fix_finding(
+    req: FixFindingRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db)
+):
+    """
+    Generate an AI-powered code fix for a specific finding.
+    Validates ownership, then uses finding details and file content to produce a targeted fix.
+    """
+    start = time.time()
+    logger.info(f"User {current_user.id} requested AI fix for finding: {req.finding_type}/{req.issue[:60]}")
+
+    # ── Ownership validation ────────────────────────────────────────
+    # Verify the finding belongs to an analysis owned by the current user
+    finding_record = None
+    try:
+        finding_uuid = uuid.UUID(req.finding_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Invalid finding ID format.")
+    if req.finding_type == "security":
+        res = await db.execute(
+            select(SecurityFinding).where(SecurityFinding.id == finding_uuid)
+        )
+        finding_record = res.scalar_one_or_none()
+    elif req.finding_type == "code_smell":
+        res = await db.execute(
+            select(CodeSmell).where(CodeSmell.id == finding_uuid)
+        )
+        finding_record = res.scalar_one_or_none()
+
+    if finding_record is not None:
+        ownership_res = await db.execute(
+            select(Analysis)
+            .join(Repository)
+            .where((Analysis.id == finding_record.analysis_id) & (Repository.user_id == current_user.id))
+        )
+        if not ownership_res.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Finding does not belong to the current user.")
+
+    provider, llm_api_key = _resolve_llm_key(current_user)
+    if not llm_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No LLM API Key is configured for your profile. Add one in Settings."
+        )
+
+    from app.utils.prompts import SYSTEM_GENERATE_FIX_PROMPT
+
+    user_prompt = f"""Generate a precise fix for the following code finding.
+
+Finding Type: {req.finding_type}
+Severity: {req.severity}
+Issue: {req.issue}
+Suggestion: {req.suggestion or 'N/A'}
+
+Original/Snippet (before fix):
+```
+{req.before_code or req.after_code or 'N/A'}
+```
+
+Full file path: {req.file_path}
+
+Full file content:
+```
+{req.file_content}
+```
+
+Generate the exact code change needed to fix this issue.
+"""
+
+    try:
+        client = build_llm_client(provider, llm_api_key)
+        model = get_model_name(provider, current_user.llm_default_model)
+
+        chat_completion = create_chat_completion(
+            client=client,
+            provider=provider,
+            messages=[
+                {"role": "system", "content": SYSTEM_GENERATE_FIX_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            model=model,
+            temperature=0.2,
+        )
+        result_text = chat_completion.choices[0].message.content
+
+        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", result_text)
+        if json_match:
+            result_text = json_match.group(1).strip()
+        try:
+            result_data = json.loads(result_text)
+        except json.JSONDecodeError:
+            object_match = re.search(r"\{[\s\S]*\}", result_text)
+            if object_match:
+                try:
+                    result_data = json.loads(object_match.group(0))
+                except json.JSONDecodeError:
+                    result_data = {"explanation": result_text, "fixed_code_snippet": "", "fixed_full_file": ""}
+            else:
+                result_data = {"explanation": result_text, "fixed_code_snippet": "", "fixed_full_file": ""}
+
+        # ── Fallback: resolve alternative field names the LLM might return ──
+        has_fixed_code = bool(result_data.get("fixed_code_snippet"))
+        has_fixed_full = bool(result_data.get("fixed_full_file"))
+
+        if not has_fixed_code and not has_fixed_full:
+            logger.info(f"LLM response missing fixed_code_snippet/fixed_full_file. Keys: {list(result_data.keys())}")
+            for alt_key in ["fix", "code", "patched_code", "fixed_code", "replacement_code", "patched", "replacement", "fixed", "patch", "fixed_code_snippet"]:
+                alt_val = result_data.get(alt_key)
+                if alt_val and isinstance(alt_val, str) and alt_val.strip():
+                    logger.info(f"LLM returned fix under alternative field '{alt_key}' (len={len(alt_val)})")
+                    result_data["fixed_code_snippet"] = alt_val
+                    has_fixed_code = True
+                    break
+
+        if not has_fixed_code and not has_fixed_full:
+            # Try extracting code from a fenced code block inside the explanation or raw text
+            expl = result_data.get("explanation", "") or result_text
+            # First try: ```language\n...``` pattern (actual newlines)
+            cb_match = re.search(r"```(?:\w+)?\n(.+?)```", expl, re.DOTALL)
+            if cb_match:
+                extracted = cb_match.group(1).strip()
+                if extracted:
+                    logger.info(f"Extracted fix code from explanation code block (len={len(extracted)})")
+                    result_data["fixed_code_snippet"] = extracted
+                    has_fixed_code = True
+            if not has_fixed_code:
+                # Second try: look for any code block in the raw response
+                cb_match = re.search(r"```(?:\w+)?\n(.+?)```", result_text, re.DOTALL)
+                if cb_match:
+                    extracted = cb_match.group(1).strip()
+                    if extracted:
+                        logger.info(f"Extracted fix code from raw response code block (len={len(extracted)})")
+                        result_data["fixed_code_snippet"] = extracted
+                        has_fixed_code = True
+
+        latency = round(time.time() - start, 2)
+        logger.info(f"Fix generated in {latency}s for {req.finding_type} finding | "
+                     f"has_fixed_code={has_fixed_code} | "
+                     f"has_fixed_full={has_fixed_full} | "
+                     f"has_explanation={bool(result_data.get('explanation'))} | "
+                     f"llm_keys={list(result_data.keys())}")
+        return FixFindingResponse(
+            fix_type=result_data.get("fix_type", req.finding_type),
+            original_code_snippet=result_data.get("original_code_snippet", ""),
+            fixed_code_snippet=result_data.get("fixed_code_snippet", ""),
+            fixed_full_file=result_data.get("fixed_full_file", ""),
+            explanation=result_data.get("explanation", "Fix generated."),
+            start_line=result_data.get("start_line", 1),
+            end_line=result_data.get("end_line", 1),
+            latency_seconds=latency
+        )
+    except HTTPException:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Fix finding failed: {e}", exc_info=True)
+        raise _raise_friendly_llm_error(provider, e)
+
+
+# [REMOVED] _generate_single_fix — helper was only used by the removed fix-all endpoint
+# This project does not modify repositories
+
+
+# [REMOVED] fix-all endpoint — this project does not modify repositories
+
+
+# [REMOVED] fix-all-and-pr endpoint — this project does not modify repositories
+
+
 class ExplainRequest(BaseModel):
     finding_id: uuid.UUID
     issue_type: str  # "security" or "code_smell"
@@ -681,33 +974,50 @@ async def explain_finding(
     if not ownership_res.scalar_one_or_none():
         raise HTTPException(status_code=403, detail="Finding does not belong to the current user.")
         
-    groq_key = encryptor.decrypt(current_user.groq_api_key_encrypted) if current_user.groq_api_key_encrypted else settings.GROQ_API_KEY
-    if not groq_key:
-        raise HTTPException(status_code=400, detail="Groq API Key is not configured for your profile.")
-        
-    client = build_groq_client(groq_key)
-    
+    provider, llm_api_key = _resolve_llm_key(current_user)
+    if not llm_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No LLM API Key is configured for your profile. Add one in Settings."
+        )
+
+    client = build_llm_client(provider, llm_api_key)
+    model = get_model_name(provider, current_user.llm_default_model)
+
     system_prompt = """You are an expert senior software engineer and static analysis (AppSec) specialist.
-    Provide a detailed explanation for the following code finding.
-    
-    You must structure your response into five distinct markdown sections:
-    ### ðŸ” What is wrong
-    Explain what is wrong with the code in simple, precise engineering terms.
-    
-    ### â“ Why it is wrong
-    Describe why it is suboptimal, insecure, or considered a bad practice.
-    
-    ### âš ï¸ What could happen
-    Explain the potential risk, impact, scalability bottleneck, or exploit vector that could result if left unfixed.
-    
-    ### ðŸ› ï¸ How to fix it
-    Give clear, actionable instructions on how to refactor or rewrite the code to resolve this issue.
-    
-    ### ðŸŒŸ Best practice
-    Share general architectural design guidelines or industry standards related to this issue (e.g. OWASP, Clean Code, SOLID principles).
+    Explain the ONE specific code finding given below. Stay strictly grounded in the evidence provided.
+
+    MANDATORY structure (markdown headings, exactly these five):
+
+    ## What is the issue?
+    Simple, precise explanation of the detected problem.
+
+    ## Why was it detected?
+    Point at what in the ACTUAL code caused the finding (quote the relevant line/snippet).
+
+    ## What could happen?
+    ONLY realistic consequences supported by this finding and this code. If a consequence
+    depends on backend behaviour, caller behaviour, or configuration that is NOT shown in
+    the provided context, explicitly say: "This depends on the backend implementation,
+    which is not visible in the provided context."
+
+    ## How to fix it
+    A practical fix for THIS code (reference the actual file/line).
+
+    ## Example
+    A short before/after code example when useful; otherwise a one-line note saying the fix
+    is fully described above.
+
+    HARD RULES:
+    - Do NOT claim the issue is definitely exploitable; the scanner identified a possible risk.
+    - Do NOT assume command injection, SQL injection, path traversal, or file disclosure
+      unless the shown code actually demonstrates it.
+    - Do NOT invent backend behaviour, APIs, routes, or application features.
+    - Do NOT mention security tools or scanners that were not used.
+    - Keep it concise (under 300 words) and specific to this finding.
     """
     
-    user_prompt = f"""Finding details:
+    user_prompt = f"""Finding details (the ONLY evidence you may use):
 File: {finding.file}
 Line: {finding.line}
 Issue Summary: {finding.issue}
@@ -716,27 +1026,32 @@ Recommendation Suggestion: {finding.suggestion}
 
 Code Context (suboptimal version):
 ```
-{finding.before_code or 'N/A'}
+{finding.before_code or '(not captured by the scanner)'}
 ```
 
 Remediated Code Suggestion:
 ```
-{finding.after_code or 'N/A'}
+{finding.after_code or '(not captured by the scanner)'}
 ```
+
+If the code context above is '(not captured by the scanner)', base the explanation on the
+issue summary and suggestion only, and say so explicitly instead of guessing about the code.
 """
     try:
-        chat_completion = client.chat.completions.create(
+        chat_completion = create_chat_completion(
+            client=client,
+            provider=provider,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            model="llama-3.3-70b-versatile",
-            temperature=0.3
+            model=model,
+            temperature=current_user.llm_temperature or 0.3,
         )
         explanation = chat_completion.choices[0].message.content
         return {"explanation": explanation}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate explanation: {str(e)}")
+        raise _raise_friendly_llm_error(provider, e)
 
 
 

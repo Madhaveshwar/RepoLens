@@ -1,13 +1,14 @@
 from typing import Any
 import re
 from langsmith import traceable
-from backend.app.utils.prompts import SYSTEM_SMELL_PROMPT, build_smell_prompt
-from backend.app.services.security_scanner import parse_json_from_llm
-from backend.app.utils.logger import get_logger
+from app.utils.prompts import SYSTEM_SMELL_PROMPT, build_smell_prompt
+from app.services.security_scanner import parse_json_from_llm
+from app.utils.logger import get_logger
+from app.services.llm_client import GROQ_FALLBACK_MODEL
 
 logger = get_logger("code_smell_detector")
 
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "openai/gpt-oss-120b"
 CONFIDENCE_THRESHOLD = 0.75
 
 # ── Only these smell types are valid ───────────────────────────
@@ -97,7 +98,7 @@ def detect_code_smells(
 ) -> list[dict[str, object]]:
     logger.info(f"Triggered code smell detection for file: {filename} ({language})")
     prompt = build_smell_prompt(filename, code, patch, language)
-    active_model = "llama-3.3-70b-versatile"
+    active_model = MODEL_NAME
     try:
         logger.info(f"Sending code smell analysis request with model={active_model}")
         chat_completion = client.chat.completions.create(
@@ -109,24 +110,24 @@ def detect_code_smells(
             temperature=temperature,
         )
         result_text = chat_completion.choices[0].message.content
-        logger.info("Retrieved code smell scan completion from Groq API.")
+        logger.info("Retrieved code smell scan completion from LLM API.")
     except Exception as e:
-        logger.warning(f"Groq query failed for code smell scan using {active_model}: {e}")
+        logger.warning(f"LLM query failed for code smell scan using {active_model}: {e}")
         try:
-            logger.info("Attempting fallback code smell query using model=llama-3.1-8b-instant")
+            logger.info(f"Attempting fallback code smell query using model={GROQ_FALLBACK_MODEL}")
             chat_completion = client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": SYSTEM_SMELL_PROMPT},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama-3.1-8b-instant",
+                model=GROQ_FALLBACK_MODEL,
                 temperature=temperature,
             )
             result_text = chat_completion.choices[0].message.content
             logger.info("Successfully retrieved fallback code smell scan completion.")
         except Exception as fallback_e:
             logger.error("Fallback code smell query failed.", exc_info=True)
-            from backend.app.services.reviewer import handle_groq_error
+            from app.services.reviewer import handle_groq_error
             raise handle_groq_error(fallback_e)
 
     findings = parse_json_from_llm(result_text)

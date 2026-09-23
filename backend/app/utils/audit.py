@@ -1,8 +1,8 @@
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
-from backend.app.models.models import AuditLog
-from backend.app.database.database import SessionLocal
-from backend.app.utils.logger import get_logger
+from app.models.models import AuditLog
+from app.database.database import SessionLocal
+from app.utils.logger import get_logger
 
 logger = get_logger("audit_logger")
 
