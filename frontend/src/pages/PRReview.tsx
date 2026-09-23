@@ -119,7 +119,7 @@ export const PRReview: React.FC<PRReviewProps> = ({ onBack }) => {
             Please connect Groq or OpenAI in Settings to run PR reviews.
           </p>
           <button onClick={onBack} className="btn-secondary mr-2">Go Back</button>
-          <a href="/settings" className="btn-primary inline-flex items-center gap-2">
+          <a href="/settings" onClick={(e) => { e.preventDefault(); window.location.hash = ""; }} className="btn-primary inline-flex items-center gap-2">
             <Settings className="w-4 h-4" /> Open Settings
           </a>
         </div>
@@ -138,7 +138,7 @@ export const PRReview: React.FC<PRReviewProps> = ({ onBack }) => {
             Please connect a GitHub Token in Settings to review pull requests.
           </p>
           <button onClick={onBack} className="btn-secondary mr-2">Go Back</button>
-          <a href="/settings" className="btn-primary inline-flex items-center gap-2">
+          <a href="/settings" onClick={(e) => { e.preventDefault(); window.location.hash = ""; }} className="btn-primary inline-flex items-center gap-2">
             <Settings className="w-4 h-4" /> Open Settings
           </a>
         </div>
@@ -150,20 +150,20 @@ export const PRReview: React.FC<PRReviewProps> = ({ onBack }) => {
 
   const renderPatchDiff = (patchText: string) => {
     if (!patchText) {
-      return <div className="h-full flex items-center justify-center text-xs text-zinc-700">No diff available</div>;
+      return <div className="h-full flex items-center justify-center text-xs text-zinc-600 dark:text-zinc-400">No diff available</div>;
     }
     const lines = patchText.split("\n");
     return (
-      <div className="font-mono text-xs overflow-x-auto p-4 space-y-0.5 bg-zinc-50 h-full">
+      <div className="font-mono text-xs overflow-x-auto p-4 space-y-0.5 bg-zinc-50 dark:bg-zinc-900 h-full">
         {lines.map((line, idx) => {
           let lineBg = "bg-transparent";
-          let lineText = "text-zinc-700";
+          let lineText = "text-zinc-700 dark:text-zinc-300";
           if (line.startsWith("+")) { lineBg = "bg-accent-green/10 text-accent-green"; }
           else if (line.startsWith("-")) { lineBg = "bg-accent-red/10 text-accent-red"; }
           else if (line.startsWith("@@")) { lineBg = "bg-accent-blue/10 text-accent-blue font-semibold"; }
           return (
             <div key={idx} className={`flex ${lineBg} py-0.5 px-2 rounded`}>
-              <span className="w-10 text-right select-none pr-3 text-zinc-500 border-r border-white/10 mr-3">{idx + 1}</span>
+              <span className="w-10 text-right select-none pr-3 text-zinc-500 dark:text-zinc-500 border-r border-border/40 mr-3">{idx + 1}</span>
               <span className={`whitespace-pre ${lineText}`}>{line}</span>
             </div>
           );

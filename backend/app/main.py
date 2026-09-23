@@ -11,7 +11,7 @@ from app.database.database import Base, sync_engine
 from app.routers import (
     auth, users, repositories, pull_requests,
     analysis, security, code_quality, tests, reports, health, explorer,
-    webhooks, audit_logs, chat, dead_letter_queue
+    webhooks, audit_logs, chat, dead_letter_queue, insights
 )
 
 def init_db():
@@ -197,6 +197,7 @@ app.include_router(webhooks.router, prefix=settings.API_V1_STR)
 app.include_router(audit_logs.router, prefix=settings.API_V1_STR)
 app.include_router(chat.router, prefix=settings.API_V1_STR)
 app.include_router(dead_letter_queue.router, prefix=settings.API_V1_STR)
+app.include_router(insights.router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 def read_root():

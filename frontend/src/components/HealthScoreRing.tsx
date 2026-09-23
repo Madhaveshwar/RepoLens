@@ -17,6 +17,24 @@ const getScoreColor = (score: number): string => {
   return "#EF4444";
 };
 
+// Track color follows the theme so the ring stays visible in dark mode.
+function useRingTrackColor(): string {
+  const [color, setColor] = React.useState(() =>
+    typeof document !== "undefined" && document.documentElement.classList.contains("dark")
+      ? "#27272A"
+      : "#E5E7EB"
+  );
+  React.useEffect(() => {
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => {
+      setColor(root.classList.contains("dark") ? "#27272A" : "#E5E7EB");
+    });
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+  return color;
+}
+
 const getScoreLabel = (score: number): string => {
   if (score >= 90) return "Excellent";
   if (score >= 75) return "Good";
@@ -36,6 +54,7 @@ export const HealthScoreRing: React.FC<HealthScoreRingProps> = ({
   const [displayScore, setDisplayScore] = useState(animate ? 0 : safeScore);
   const color = getScoreColor(safeScore);
   const scoreLabel = getScoreLabel(safeScore);
+  const trackColor = useRingTrackColor();
   // label is kept in the interface for future use
 
   // Animated counter
@@ -76,7 +95,7 @@ export const HealthScoreRing: React.FC<HealthScoreRingProps> = ({
             cy={size / 2}
             r={(size - strokeWidth) / 2}
             fill="none"
-            stroke="#E5E7EB"
+            stroke={trackColor}
             strokeWidth={strokeWidth}
           />
         </svg>
@@ -108,7 +127,7 @@ export const HealthScoreRing: React.FC<HealthScoreRingProps> = ({
           cy={size / 2}
           r={radius}
           fill="none"
-          stroke="#E5E7EB"
+          stroke={trackColor}
           strokeWidth={strokeWidth}
           className="transition-colors"
         />

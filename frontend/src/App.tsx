@@ -16,7 +16,7 @@ import { Settings } from "./pages/Settings";
 import { Loader2, Shield } from "lucide-react";
 
 export const App: React.FC = () => {
-  const { token, user, initialize, loading } = useAuthStore();
+  const { token, user, initialize, loading, justLoggedIn, clearJustLoggedIn } = useAuthStore();
   const { activeRepo, activePr, setActiveRepo, setActivePr } = useRepositoryStore();
 
   // Navigation tabs
@@ -50,7 +50,7 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // First-login onboarding: redirect to Settings if no LLM key or GitHub PAT configured
+  // Has an LLM key or GitHub PAT been configured?
   const hasLlmKey = user
     ? (user.has_groq_api_key || user.has_openai_api_key ||
        user.has_claude_api_key || user.has_gemini_api_key || user.has_openrouter_api_key)
@@ -58,11 +58,53 @@ export const App: React.FC = () => {
   const hasGithubPat = user?.has_github_pat || false;
   const isSetupComplete = user ? (hasLlmKey && hasGithubPat) : false;
 
+  // Post-login behavior: open the Settings page first after a successful
+  // interactive login (NOT after a session restore on refresh). Once setup is
+  // complete the flag is cleared so the user isn't trapped on Settings.
   useEffect(() => {
-    if (user && !isSetupComplete) {
+    if (!user) return;
+    if (justLoggedIn) {
       setActiveTab("settings");
+      if (isSetupComplete) {
+        clearJustLoggedIn();
+      }
+    } else if (activeTab === "settings" && isSetupComplete && !justLoggedIn) {
+      // Setup completed while on Settings — leave the user where they are;
+      // they can navigate to the Dashboard themselves.
     }
-  }, [user?.id, isSetupComplete]);
+  }, [user?.id, isSetupComplete, justLoggedIn]);
+
+  // Restore the last viewed repository on refresh so deep-linking/refresh
+  // doesn't dump the user back on the Dashboard.
+  useEffect(() => {
+    if (!user || activeRepo) return;
+    try {
+      const saved = localStorage.getItem("repolens-active-repo");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.id && parsed.name) {
+          setActiveRepo(parsed);
+        } else {
+          localStorage.removeItem("repolens-active-repo");
+        }
+      }
+    } catch {
+      localStorage.removeItem("repolens-active-repo");
+    }
+  }, [user?.id]);
+
+  // Persist the active repository for refresh restore
+  useEffect(() => {
+    try {
+      if (activeRepo) {
+        localStorage.setItem("repolens-active-repo", JSON.stringify(activeRepo));
+      } else {
+        localStorage.removeItem("repolens-active-repo");
+      }
+    } catch {
+      // ignore persistence errors
+    }
+  }, [activeRepo]);
 
   if (loading) {
     return (
@@ -72,7 +114,7 @@ export const App: React.FC = () => {
             <Shield className="w-8 h-8 text-white" />
           </div>
           <Loader2 className="w-6 h-6 animate-spin text-accent-blue" />
-          <p className="text-base text-zinc-700 font-medium">Initializing your workspace...</p>
+          <p className="text-base text-zinc-700 font-medium dark:text-zinc-200">Initializing your workspace...</p>
         </div>
       </div>
     );

@@ -217,7 +217,7 @@ export const Landing: React.FC<LandingProps> = ({ onNavigateToLogin, onNavigateT
 
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="md:hidden text-muted hover:text-white p-2"
+            className="md:hidden text-muted hover:text-zinc-950 p-2 dark:hover:text-white"
             aria-label="Toggle mobile menu"
           >
             {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -235,7 +235,7 @@ export const Landing: React.FC<LandingProps> = ({ onNavigateToLogin, onNavigateT
             >
               {["features", "workflow", "pricing", "faq"].map((item) => (
                 <button key={item} onClick={() => scrollTo(item)}
-                  className="block w-full text-left text-sm text-muted hover:text-white py-2">
+                  className="block w-full text-left text-sm text-muted hover:text-zinc-950 py-2 dark:hover:text-white">
                   {item === "workflow" ? "How it Works" : item.charAt(0).toUpperCase() + item.slice(1)}
                 </button>
               ))}
@@ -564,7 +564,7 @@ export const Landing: React.FC<LandingProps> = ({ onNavigateToLogin, onNavigateT
                   viewport={{ once: true }}
                   transition={{ delay: 0.5 }}
                 >
-                  <div className="w-10 h-10 rounded-xl bg-accent-gradient/30 flex items-center justify-center text-xs font-bold text-white">
+                  <div className="w-10 h-10 rounded-xl bg-accent-gradient/30 flex items-center justify-center text-xs font-bold text-zinc-900 dark:text-white">
                     {t.avatar}
                   </div>
                   <div>
@@ -801,7 +801,7 @@ export const Landing: React.FC<LandingProps> = ({ onNavigateToLogin, onNavigateT
             </p>
             <div className="flex items-center gap-4">
               {[Github, Twitter, Linkedin, Mail].map((Icon, i) => (
-                <motion.a key={i} href="#" className="text-muted hover:text-white transition-colors" whileHover={{ scale: 1.2, rotate: 5 }}>
+                <motion.a key={i} href="#" className="text-muted hover:text-zinc-950 transition-colors dark:hover:text-white" whileHover={{ scale: 1.2, rotate: 5 }}>
                   <Icon className="w-4 h-4" />
                 </motion.a>
               ))}

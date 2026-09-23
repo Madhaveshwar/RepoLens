@@ -58,6 +58,9 @@ class Repository(Base):
     user = relationship("User", back_populates="repositories")
     pull_requests = relationship("PullRequest", back_populates="repository", cascade="all, delete-orphan")
     analyses = relationship("Analysis", back_populates="repository", cascade="all, delete-orphan")
+    health_snapshots = relationship("RepositoryHealthSnapshot", cascade="all, delete-orphan")
+    pr_reviews = relationship("PullRequestReview", cascade="all, delete-orphan")
+    commit_analyses = relationship("CommitAnalysis", cascade="all, delete-orphan")
 
 class PullRequest(Base):
     __tablename__ = "pull_requests"
@@ -106,6 +109,11 @@ class Analysis(Base):
     test_suggestions = relationship("TestSuggestion", back_populates="analysis", cascade="all, delete-orphan")
     health_scores = relationship("HealthScore", back_populates="analysis", cascade="all, delete-orphan")
     reports = relationship("Report", back_populates="analysis", cascade="all, delete-orphan")
+    dependency_findings = relationship("DependencyFinding", cascade="all, delete-orphan")
+    duplicate_findings = relationship("DuplicateCodeFinding", cascade="all, delete-orphan")
+    debt_findings = relationship("TechnicalDebtFinding", cascade="all, delete-orphan")
+    architecture_analyses = relationship("ArchitectureAnalysis", cascade="all, delete-orphan")
+    complexity_findings = relationship("ComplexityFinding", cascade="all, delete-orphan")
 
 class SecurityFinding(Base):
     __tablename__ = "security_findings"
@@ -125,6 +133,7 @@ class SecurityFinding(Base):
     code_snippet = Column(Text, nullable=True)
     issue_explanation = Column(Text, nullable=True)
     confidence_score = Column(Integer, default=85, nullable=True)
+    source = Column(String, nullable=True)  # ai_analysis | static_analysis
 
     analysis = relationship("Analysis", back_populates="security_findings")
 
@@ -146,6 +155,7 @@ class CodeSmell(Base):
     code_snippet = Column(Text, nullable=True)
     issue_explanation = Column(Text, nullable=True)
     confidence_score = Column(Integer, default=85, nullable=True)
+    source = Column(String, nullable=True)  # ai_analysis | static_analysis
 
     analysis = relationship("Analysis", back_populates="code_smells")
 
@@ -210,6 +220,185 @@ class DeadLetterTask(Base):
     failed_at = Column(DateTime, default=datetime.utcnow)
     resolved = Column(Boolean, default=False)
     resolved_at = Column(DateTime, nullable=True)
+
+# ═══════════════════════════════════════════════════════════════════
+# Repository Insights Models (health trend, dependencies, duplicates,
+# technical debt, architecture, complexity, PR reviews, commit analyses)
+# ═══════════════════════════════════════════════════════════════════
+
+class RepositoryHealthSnapshot(Base):
+    """One row per completed repository scan so health can be tracked over time.
+
+    Never back-filled with invented data: rows are only created by the
+    scan pipeline when a scan actually completes.
+    """
+    __tablename__ = "repository_health_snapshots"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False, index=True)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=False, index=True)
+    branch = Column(String, nullable=True)
+    commit_sha = Column(String, nullable=True)
+    health_score = Column(Integer, nullable=False)
+    security_score = Column(Integer, nullable=True)
+    code_quality_score = Column(Integer, nullable=True)
+    code_smell_count = Column(Integer, default=0, nullable=True)
+    performance_issue_count = Column(Integer, default=0, nullable=True)
+    critical_count = Column(Integer, default=0, nullable=True)
+    high_count = Column(Integer, default=0, nullable=True)
+    medium_count = Column(Integer, default=0, nullable=True)
+    low_count = Column(Integer, default=0, nullable=True)
+    total_issue_count = Column(Integer, default=0, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    repository = relationship("Repository")
+    analysis = relationship("Analysis")
+
+
+class DependencyFinding(Base):
+    """A single dependency parsed from a real dependency manifest file.
+
+    status distinguishes: known_vulnerable | outdated | unknown.
+    advisory_id is only set when a real advisory ID was matched.
+    """
+    __tablename__ = "dependency_findings"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=False, index=True)
+    ecosystem = Column(String, nullable=False)          # npm, pip, maven, gradle, go, cargo, composer, bundler
+    manifest_file = Column(String, nullable=False)      # e.g. "package.json"
+    package_name = Column(String, nullable=False)
+    version_spec = Column(String, nullable=True)        # spec as written in the manifest
+    resolved_version = Column(String, nullable=True)    # exact version when lockfile provides it
+    status = Column(String, nullable=False, default="unknown")
+    severity = Column(String, nullable=True)            # Critical/High/Medium/Low for known vulns
+    advisory_id = Column(String, nullable=True)         # e.g. "GHSA-xxxx" / "CVE-..." when real
+    vulnerable_range = Column(String, nullable=True)    # description of affected range
+    recommended_version = Column(String, nullable=True)
+    advisory_url = Column(String, nullable=True)
+    evidence = Column(Text, nullable=True)              # why we classified it this way
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    analysis = relationship("Analysis")
+
+
+class DuplicateCodeFinding(Base):
+    __tablename__ = "duplicate_code_findings"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=False, index=True)
+    file_a = Column(String, nullable=False)
+    start_line_a = Column(Integer, nullable=False)
+    end_line_a = Column(Integer, nullable=False)
+    file_b = Column(String, nullable=False)
+    start_line_b = Column(Integer, nullable=False)
+    end_line_b = Column(Integer, nullable=False)
+    similarity = Column(Integer, nullable=False)        # 0-100
+    duplicated_lines = Column(Integer, nullable=False)
+    token_hash = Column(String, nullable=True, index=True)  # group clones sharing the same block hash
+    snippet = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    analysis = relationship("Analysis")
+
+
+class TechnicalDebtFinding(Base):
+    __tablename__ = "technical_debt_findings"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=False, index=True)
+    category = Column(String, nullable=False)           # code_smell, complexity, duplication, todos, long_functions, large_files, security, dependencies
+    severity = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    evidence = Column(Text, nullable=False)             # measured facts only
+    file = Column(String, nullable=True)
+    line_start = Column(Integer, nullable=True)
+    line_end = Column(Integer, nullable=True)
+    estimated_effort_hours = Column(Float, nullable=True)  # heuristic estimate, always labelled as estimate
+    remediation = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    analysis = relationship("Analysis")
+
+
+class ArchitectureAnalysis(Base):
+    __tablename__ = "architecture_analyses"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=False, index=True)
+    result = Column(JSON, nullable=False)               # full evidence-based architecture payload
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    analysis = relationship("Analysis")
+
+
+class ComplexityFinding(Base):
+    __tablename__ = "complexity_findings"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=False, index=True)
+    file = Column(String, nullable=False)
+    name = Column(String, nullable=False)               # function/class name
+    kind = Column(String, nullable=False, default="function")  # function | method | class
+    line_start = Column(Integer, nullable=False)
+    line_end = Column(Integer, nullable=True)
+    cyclomatic_complexity = Column(Integer, nullable=False)
+    nesting_depth = Column(Integer, nullable=True)
+    length_lines = Column(Integer, nullable=True)
+    language = Column(String, nullable=True)
+    severity = Column(String, nullable=False, default="Low")
+    explanation = Column(Text, nullable=True)
+    suggestion = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    analysis = relationship("Analysis")
+
+
+class PullRequestReview(Base):
+    """Persisted PR review from the dedicated PR review pipeline.
+
+    findings_json keeps the full findings list including the
+    `source` field (ai_analysis vs deterministic/static).
+    """
+    __tablename__ = "pull_request_reviews"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False, index=True)
+    pr_number = Column(Integer, nullable=False, index=True)
+    head_sha = Column(String, nullable=True)
+    base_branch = Column(String, nullable=True)
+    head_branch = Column(String, nullable=True)
+    author = Column(String, nullable=True)
+    title = Column(String, nullable=True)
+    description = Column(Text, nullable=True)
+    risk_score = Column(Integer, nullable=True)
+    summary = Column(Text, nullable=True)               # AI summary (grounded in actual diff)
+    findings_json = Column(JSON, nullable=False, default=list)
+    files_changed = Column(Integer, nullable=True)
+    additions = Column(Integer, nullable=True)
+    deletions = Column(Integer, nullable=True)
+    status = Column(String, nullable=False, default="completed")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    repository = relationship("Repository")
+
+
+class CommitAnalysis(Base):
+    """Persisted commit/change analysis (compare commit vs its parent)."""
+    __tablename__ = "commit_analyses"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False, index=True)
+    commit_sha = Column(String, nullable=False, index=True)
+    parent_sha = Column(String, nullable=True)
+    author = Column(String, nullable=True)
+    message = Column(Text, nullable=True)
+    committed_at = Column(DateTime, nullable=True)
+    files_changed = Column(Integer, nullable=True)
+    additions = Column(Integer, nullable=True)
+    deletions = Column(Integer, nullable=True)
+    security_impact = Column(Text, nullable=True)
+    quality_impact = Column(Text, nullable=True)
+    code_smells_json = Column(JSON, nullable=True, default=list)
+    complexity_json = Column(JSON, nullable=True, default=list)
+    ai_summary = Column(Text, nullable=True)
+    findings_json = Column(JSON, nullable=True, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    repository = relationship("Repository")
+
 
 class PasswordResetToken(Base):
     """Single-use, time-limited password reset tokens.

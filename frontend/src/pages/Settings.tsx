@@ -4,8 +4,10 @@ import axios from "../lib/api";
 import { useAuthStore } from "../store/authStore";
 import {
   Key, Github, CheckCircle2, AlertTriangle, Loader2,
-  Eye, EyeOff, Brain, Shield, Rocket, X, Trash2, Sparkles, Cpu, Zap, Globe
+  Eye, EyeOff, Brain, Shield, Rocket, X, Trash2, Sparkles, Cpu, Zap, Globe,
+  Sun, Moon
 } from "lucide-react";
+import { useThemeStore } from "../store/themeStore";
 
 // ── Types ──
 
@@ -98,8 +100,6 @@ const PROVIDERS = [
   }
 ];
 
-const LLM_PROVIDERS = PROVIDERS.filter(p => p.category === "llm");
-
 const EMPTY_FORM_KEYS: Record<string, string> = Object.fromEntries(
   PROVIDERS.map(p => [p.key, ""])
 );
@@ -179,27 +179,6 @@ export const Settings: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [deletingProvider, setDeletingProvider] = useState<string | null>(null);
 
-  // ── Default provider & model selection ──
-  const [defaultProvider, setDefaultProvider] = useState<string>(user?.llm_default_provider || "groq");
-  const [defaultModel, setDefaultModel] = useState<string>(user?.llm_default_model || "");
-
-  const MODEL_OPTIONS: Record<string, string[]> = {
-    groq: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
-    openai: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
-    claude: ["claude-3-haiku-20240307", "claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"],
-    gemini: ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"],
-    openrouter: ["meta-llama/llama-3.3-70b-instruct:free", "openai/gpt-oss-20b:free", "deepseek/deepseek-chat-v3-0324:free"],
-  };
-
-  useEffect(() => {
-    if (user?.llm_default_provider) {
-      setDefaultProvider(user.llm_default_provider);
-    }
-    if (user?.llm_default_model) {
-      setDefaultModel(user.llm_default_model);
-    }
-  }, [user?.llm_default_provider, user?.llm_default_model]);
-
   const getProviderStatus = (providerKey: string): { status: string; api_status: string; last_tested?: string } => {
     const d = diagnostics?.providers?.[providerKey];
     if (!d) {
@@ -221,14 +200,6 @@ export const Settings: React.FC = () => {
         if (value.trim()) {
           payload[provider.fieldName] = value.trim();
         }
-      }
-
-      // Always include default provider + model selection
-      if (defaultProvider) {
-        payload["llm_default_provider"] = defaultProvider;
-      }
-      if (defaultModel) {
-        payload["llm_default_model"] = defaultModel;
       }
 
       if (Object.keys(payload).length === 0) {
@@ -276,10 +247,7 @@ export const Settings: React.FC = () => {
     user.has_claude_api_key || user.has_gemini_api_key || user.has_openrouter_api_key
   ) : false;
 
-  const isProviderConfigured = (providerKey: string): boolean => {
-    const s = getProviderStatus(providerKey);
-    return s.status !== "Missing";
-  };
+  const { theme, setTheme } = useThemeStore();
 
   return (
     <div className="flex-1 p-8 overflow-y-auto max-h-screen">
@@ -395,64 +363,45 @@ export const Settings: React.FC = () => {
           )}
         </div>
 
-        {/* Default LLM Provider Selection */}
+        {/* Appearance — Light/Dark theme */}
         <div className="glass-card p-6 mb-8">
           <div className="flex items-center gap-3 mb-5 border-b border-border/40 pb-4">
-            <div className="w-10 h-10 rounded-2xl bg-violet-50 flex items-center justify-center">
-              <Sparkles className="w-5 h-5 text-violet-600" />
+            <div className="w-10 h-10 rounded-2xl bg-blue-50 flex items-center justify-center">
+              {theme === "dark" ? <Moon className="w-5 h-5 text-accent-blue" /> : <Sun className="w-5 h-5 text-accent-blue" />}
             </div>
             <div>
-              <h3 className="font-bold text-zinc-950">Default LLM Provider</h3>
-              <p className="text-xs text-zinc-700 font-medium">Choose which AI provider powers scans & chat</p>
+              <h3 className="font-bold text-zinc-950">Appearance</h3>
+              <p className="text-xs text-zinc-700 font-medium">Choose how RepoLens AI looks on this device</p>
             </div>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-            {LLM_PROVIDERS.map((provider) => {
-              const isSelected = defaultProvider === provider.key;
-              const configured = isProviderConfigured(provider.key);
-              return (
-                <button
-                  key={provider.key}
-                  type="button"
-                  onClick={() => setDefaultProvider(provider.key)}
-                  className={`flex items-center gap-2 px-4 py-3 rounded-2xl border transition-all cursor-pointer ${
-                    isSelected
-                      ? "border-accent-blue bg-blue-50/80 text-accent-blue ring-1 ring-accent-blue/20 shadow-sm"
-                      : "border-border/40 bg-white hover:border-zinc-300 text-zinc-700"
-                  }`}
-                >
-                  {provider.icon}
-                  <span className="text-xs font-semibold">{provider.label.replace(" API Key", "")}</span>
-                  {configured && (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 ml-auto" />
-                  )}
-                </button>
-              );
-            })}
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div>
+              <p className="text-sm font-semibold text-zinc-900">Theme</p>
+              <p className="text-[11px] text-zinc-600 mt-0.5">
+                Follows your system preference until you pick one. Your choice is remembered.
+              </p>
+            </div>
+            <div className="flex gap-1 bg-zinc-100 rounded-2xl p-1 dark:bg-zinc-800">
+              <button
+                type="button"
+                onClick={() => setTheme("light")}
+                className={`flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl transition-all ${
+                  theme === "light" ? "bg-white text-accent-blue shadow-sm dark:bg-zinc-950 dark:text-white" : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-white"
+                }`}
+              >
+                <Sun className="w-3.5 h-3.5" /> Light
+              </button>
+              <button
+                type="button"
+                onClick={() => setTheme("dark")}
+                className={`flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl transition-all ${
+                  theme === "dark" ? "bg-zinc-900 text-white shadow-sm dark:bg-white dark:text-zinc-900" : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-white"
+                }`}
+              >
+                <Moon className="w-3.5 h-3.5" /> Dark
+              </button>
+            </div>
           </div>
-          {/* Model selection */}
-          <div className="mt-5 pt-4 border-t border-border/40">
-            <label className="block text-xs font-semibold text-zinc-800 uppercase tracking-wider mb-2">
-              Default Model
-            </label>
-            <select
-              value={defaultModel}
-              onChange={(e) => setDefaultModel(e.target.value)}
-              className="select-glass"
-            >
-              <option value="">Provider default (recommended)</option>
-              {(MODEL_OPTIONS[defaultProvider] || []).map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-            <p className="text-[11px] text-zinc-600 mt-2">
-              If a model is unavailable on your account, the app automatically falls back to an available one.
-            </p>
-          </div>
-
-          <p className="text-[11px] text-zinc-600 mt-3">
-            You need a valid API key for the selected provider. Falls back to Groq if the selected provider key is missing.
-          </p>
         </div>
 
         {/* Save Credentials Form */}
@@ -478,7 +427,6 @@ export const Settings: React.FC = () => {
                     {provider.icon}
                     {provider.label}
                     {provider.category === "llm" && <span className="text-accent-red text-[10px]">*</span>}
-                    {provider.optional && <span className="text-zinc-400 text-[10px] ml-1">(optional)</span>}
                   </label>
                   <div className="relative">
                     <input

@@ -9,7 +9,7 @@ interface LoginProps {
 }
 
 export const Login: React.FC<LoginProps> = ({ onNavigateToRegister, onNavigateToForgotPassword }) => {
-  const { setToken, initialize } = useAuthStore();
+  const { setToken, initialize, markJustLoggedIn } = useAuthStore();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -33,6 +33,9 @@ export const Login: React.FC<LoginProps> = ({ onNavigateToRegister, onNavigateTo
     try {
       const response = await axios.post("/auth/login", formData);
       setToken(response.data.access_token);
+      // Flag the interactive login so App opens Settings first
+      // (refresh/session-restore is unaffected).
+      markJustLoggedIn();
       await initialize();
     } catch (err: any) {
       if (!err.response) {

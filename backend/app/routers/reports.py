@@ -8,7 +8,9 @@ import os
 
 from app.database.database import get_async_db
 from app.models.models import (
-    User, Report, Analysis, Repository, SecurityFinding, CodeSmell, TestSuggestion, HealthScore
+    User, Report, Analysis, Repository, SecurityFinding, CodeSmell, TestSuggestion, HealthScore,
+    DependencyFinding, DuplicateCodeFinding, TechnicalDebtFinding, ArchitectureAnalysis,
+    ComplexityFinding, RepositoryHealthSnapshot,
 )
 from app.schemas.schemas import ReportOut
 from app.auth.security import get_current_user
@@ -118,6 +120,80 @@ async def list_user_reports(
                         "technical_debt": min(100, risk + sec_count * 3)
                     }
                 }
+
+                # ── Evidence-based insight sections (only when data exists) ──
+                dep_res = await db.execute(select(DependencyFinding).where(DependencyFinding.analysis_id == analysis_id))
+                dep_rows = list(dep_res.scalars().all())
+                if dep_rows:
+                    report_data["dependencies"] = {
+                        "findings": [{
+                            "package_name": d.package_name, "ecosystem": d.ecosystem,
+                            "resolved_version": d.resolved_version, "version_spec": d.version_spec,
+                            "status": d.status, "severity": d.severity,
+                            "advisory_id": d.advisory_id, "recommended_version": d.recommended_version,
+                        } for d in dep_rows],
+                        "summary": {
+                            "total": len(dep_rows),
+                            "known_vulnerable": sum(1 for d in dep_rows if d.status == "known_vulnerable"),
+                            "outdated": sum(1 for d in dep_rows if d.status == "outdated"),
+                            "unknown": sum(1 for d in dep_rows if d.status == "unknown"),
+                        },
+                    }
+
+                dup_res = await db.execute(select(DuplicateCodeFinding).where(DuplicateCodeFinding.analysis_id == analysis_id))
+                dup_rows = list(dup_res.scalars().all())
+                if dup_rows:
+                    report_data["duplicates"] = {
+                        "findings": [{
+                            "file_a": d.file_a, "start_line_a": d.start_line_a, "end_line_a": d.end_line_a,
+                            "file_b": d.file_b, "start_line_b": d.start_line_b, "end_line_b": d.end_line_b,
+                            "similarity": d.similarity, "duplicated_lines": d.duplicated_lines,
+                        } for d in dup_rows],
+                    }
+
+                debt_res = await db.execute(select(TechnicalDebtFinding).where(TechnicalDebtFinding.analysis_id == analysis_id))
+                debt_rows = list(debt_res.scalars().all())
+                if debt_rows:
+                    report_data["technical_debt"] = {
+                        "items": [{
+                            "category": t.category, "severity": t.severity, "title": t.title,
+                            "evidence": t.evidence, "file": t.file, "line_start": t.line_start,
+                            "estimated_effort_hours": t.estimated_effort_hours,
+                        } for t in debt_rows],
+                        "summary": {
+                            "overall_debt_score": None,
+                            "total_estimated_effort_hours": round(sum(t.estimated_effort_hours or 0 for t in debt_rows), 1),
+                        },
+                    }
+
+                arch_res = await db.execute(
+                    select(ArchitectureAnalysis)
+                    .where(ArchitectureAnalysis.analysis_id == analysis_id)
+                    .order_by(ArchitectureAnalysis.created_at.desc())
+                    .limit(1)
+                )
+                arch_row = arch_res.scalars().first()
+                if arch_row and isinstance(arch_row.result, dict):
+                    report_data["architecture"] = arch_row.result
+
+                cx_res = await db.execute(select(ComplexityFinding).where(ComplexityFinding.analysis_id == analysis_id))
+                cx_rows = list(cx_res.scalars().all())
+                if cx_rows:
+                    report_data["complexity"] = {
+                        "findings": [{
+                            "file": c.file, "name": c.name, "line_start": c.line_start,
+                            "cyclomatic_complexity": c.cyclomatic_complexity,
+                            "length_lines": c.length_lines, "severity": c.severity,
+                        } for c in cx_rows],
+                        "summary": {
+                            "total_functions_measured": len(cx_rows),
+                            "reported": len(cx_rows),
+                            "average_complexity": (
+                                round(sum(c.cyclomatic_complexity for c in cx_rows) / len(cx_rows), 2)
+                                if cx_rows else 0.0
+                            ),
+                        },
+                    }
                 
                 base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 storage_dir = os.path.join(base_dir, "storage")

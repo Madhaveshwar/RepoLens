@@ -19,6 +19,7 @@ from app.services.llm_client import build_llm_client, get_model_name, build_groq
 from app.services.report_generator import (
     generate_markdown_report, generate_json_report, generate_csv_report, generate_pdf_report
 )
+from app.services.insights_orchestrator import run_all_insights
 from app.utils.logger import get_logger
 
 logger = get_logger("celery_worker")
@@ -80,7 +81,7 @@ def update_progress(
     db=None
 ):
     """Update analysis progress in DB and publish to Redis for WebSocket streaming.
-    
+
     When `db` is provided (recommended), uses the caller's session so that
     the main Celery task and progress updates share a single session, avoiding
     StaleDataError from concurrent session writes.
@@ -88,16 +89,16 @@ def update_progress(
     """
     import uuid as std_uuid
     analysis_id = std_uuid.UUID(analysis_id) if isinstance(analysis_id, str) else analysis_id
-    
+
     should_close_db = False
     local_db = None
     session = db
-    
+
     if session is None:
         local_db = SessionLocal()
         session = local_db
         should_close_db = True
-    
+
     try:
         analysis = session.query(Analysis).filter(Analysis.id == analysis_id).first()
         if analysis:
@@ -113,7 +114,7 @@ def update_progress(
     finally:
         if should_close_db and local_db is not None:
             local_db.close()
-    
+
     # Publish to Redis channel (always, regardless of which session was used)
     publish_status = "completed" if progress >= 100 and "failed" not in status_message.lower() else ("failed" if "failed" in status_message.lower() else status)
     payload = {
@@ -202,7 +203,7 @@ def enqueue_analysis_task(background_tasks, analysis_id: str):
 
 def _run_analysis_impl(self, analysis_id: str):
     """Core implementation of the analysis pipeline.
-    
+
     Executes a PR review or repository scan, persists findings,
     and generates export reports.
     """
@@ -211,13 +212,13 @@ def _run_analysis_impl(self, analysis_id: str):
     db = SessionLocal()
     start_time = time.time()
     logger.info(f"Starting Celery analysis task for analysis_id: {analysis_id}")
-    
+
     try:
         analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
         if not analysis:
             logger.error(f"Analysis record not found for id: {analysis_id}")
             return "Analysis record not found"
-            
+
         repo = db.query(Repository).filter(Repository.id == analysis.repository_id).first()
         if not repo:
             update_progress(analysis_id, 100, "failed: Repository record missing", status="failed", db=db)
@@ -226,7 +227,7 @@ def _run_analysis_impl(self, analysis_id: str):
         if not user:
             update_progress(analysis_id, 100, "failed: Repository owner missing", status="failed", db=db)
             return "Failed: Repository owner missing"
-        
+
         # 1. Decrypt credentials
         logger.info(f"Resolving integration credentials for user_id: {user.id}")
         pat_source = "database" if user.github_pat_encrypted else "env"
@@ -287,7 +288,7 @@ def _run_analysis_impl(self, analysis_id: str):
         update_progress(analysis_id, 10, "Initializing services...", status="cloning", db=db)
         github_service = GitHubService(token=pat)
         llm_client = build_llm_client(provider, llm_api_key)
-        
+
         # Setup progress callback helper
         def progress_cb(prog, stat, msg, files_an=0, total_an=0, curr_file=""):
             update_progress(
@@ -323,11 +324,11 @@ def _run_analysis_impl(self, analysis_id: str):
                 client=llm_client,
                 progress_callback=progress_cb
             )
-            
+
         # 4. Save results to Database
         update_progress(analysis_id, 70, "Persisting code review results...", status="generating_tests", db=db)
         logger.info(f"Scan complete. Persisting findings to DB for analysis_id: {analysis_id}")
-        
+
         # Save metrics
         analysis.risk_score = results.get("risk_score", 0)
         analysis.latency_seconds = int(results.get("latency_seconds", 0))
@@ -336,7 +337,7 @@ def _run_analysis_impl(self, analysis_id: str):
         analysis.characters_analyzed_count = results.get("characters_analyzed_count", 0)
         analysis.groq_requests_made = results.get("groq_requests_made", 0)
         analysis.cached_results_used = results.get("cached_results_used", 0)
-        
+
         # Save token stats & model name
         t_stats = results.get("token_stats") or {}
         analysis.model_name = t_stats.get("model_name") or model_name
@@ -344,9 +345,9 @@ def _run_analysis_impl(self, analysis_id: str):
         analysis.completion_tokens = t_stats.get("completion_tokens") or 0
         analysis.total_tokens = t_stats.get("total_tokens") or 0
         analysis.scan_duration_seconds = int(time.time() - start_time)
-        
+
         analysis.timestamp = datetime.now(timezone.utc)
-        
+
         logger.info(
             f"Metrics saved: risk_score={analysis.risk_score}, "
             f"latency={analysis.latency_seconds}s, "
@@ -358,7 +359,7 @@ def _run_analysis_impl(self, analysis_id: str):
             f"total_tokens={analysis.total_tokens}, "
             f"scan_duration={analysis.scan_duration_seconds}s"
         )
-        
+
         security_count = 0
         smell_count = 0
         # Save security findings
@@ -379,7 +380,8 @@ def _run_analysis_impl(self, analysis_id: str):
                     start_line=f.get("start_line", f.get("line")),
                     end_line=f.get("end_line", f.get("line")),
                     code_snippet=f.get("before_code"),
-                    issue_explanation=f.get("why_it_matters")
+                    issue_explanation=f.get("why_it_matters"),
+                    source=f.get("source"),
                 ))
             elif f.get("category") == "Code Smell":
                 smell_count += 1
@@ -397,11 +399,12 @@ def _run_analysis_impl(self, analysis_id: str):
                     start_line=f.get("start_line", f.get("line")),
                     end_line=f.get("end_line", f.get("line")),
                     code_snippet=f.get("before_code"),
-                    issue_explanation=f.get("why_it_matters")
+                    issue_explanation=f.get("why_it_matters"),
+                    source=f.get("source"),
                 ))
-        
+
         logger.info(f"Saved {security_count} Security Findings and {smell_count} Code Smells.")
-                
+
         # Save test suggestions
         test_suggs = results.get("test_suggestions", "")
         if test_suggs:
@@ -411,7 +414,7 @@ def _run_analysis_impl(self, analysis_id: str):
                 file="combined_suggestions",
                 content=test_suggs
             ))
-            
+
         # Save health scores
         repo_an = results.get("repo_analysis")
         if repo_an:
@@ -462,13 +465,31 @@ def _run_analysis_impl(self, analysis_id: str):
                 docstring_coverage=100
             ))
             analysis.insights = "Pull request scan complete. See tabs for specific findings."
- 
+
         # Save metadata to DB
         db.commit()
-        
+
+        # 4.5 Deterministic repository insights (dependencies, duplicates,
+        # complexity, architecture, technical debt, health snapshot).
+        # Runs ONLY for full repository scans. Each insight is non-fatal:
+        # a failure in any insight never fails the scan itself.
+        if not analysis.pull_request_id:
+            try:
+                update_progress(analysis_id, 85, "Computing repository insights...", status="generating_insights", db=db)
+                head_sha = None
+                try:
+                    gh_repo_insights = github_service.get_client_for_repo(repo.name).get_repo(repo.name)
+                    head_sha = gh_repo_insights.get_branch(repo.default_branch).commit.sha
+                except Exception as sha_err:
+                    logger.warning(f"Could not resolve head SHA for insights: {sha_err}")
+                insights_status = run_all_insights(db, analysis_id, repo, github_service, commit_sha=head_sha)
+                logger.info(f"Repository insights completed: {insights_status}")
+            except Exception as insights_exc:
+                logger.error(f"Repository insights failed (non-fatal): {insights_exc}", exc_info=True)
+
         # 5. Generate and save exports
         update_progress(analysis_id, 90, "Generating export reports...", db=db)
-        
+
         # Format the data parameter correctly for report generators
         report_data = {
             "repo_name": repo.name,
@@ -481,34 +502,102 @@ def _run_analysis_impl(self, analysis_id: str):
             "files_analyzed_log": results.get("files_analyzed_log", []),
             "scores": results.get("scores", {})
         }
-        
+
         # Base storage path
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         storage_dir = os.path.join(base_dir, "storage")
         logger.info(f"Persisting reports to shared storage path: {storage_dir}")
         os.makedirs(storage_dir, exist_ok=True)
-        
+
+        # Include deterministic insight data in reports when available
+        try:
+            from app.models.models import (
+                DependencyFinding, DuplicateCodeFinding, TechnicalDebtFinding,
+                ArchitectureAnalysis, ComplexityFinding,
+            )
+            dep_rows = db.query(DependencyFinding).filter(DependencyFinding.analysis_id == analysis_id).all()
+            if dep_rows:
+                report_data["dependencies"] = {
+                    "findings": [{
+                        "package_name": d.package_name, "ecosystem": d.ecosystem,
+                        "resolved_version": d.resolved_version, "version_spec": d.version_spec,
+                        "status": d.status, "severity": d.severity,
+                        "advisory_id": d.advisory_id, "recommended_version": d.recommended_version,
+                    } for d in dep_rows],
+                    "summary": {
+                        "total": len(dep_rows),
+                        "known_vulnerable": sum(1 for d in dep_rows if d.status == "known_vulnerable"),
+                        "outdated": sum(1 for d in dep_rows if d.status == "outdated"),
+                        "unknown": sum(1 for d in dep_rows if d.status == "unknown"),
+                    },
+                }
+            dup_rows = db.query(DuplicateCodeFinding).filter(DuplicateCodeFinding.analysis_id == analysis_id).all()
+            if dup_rows:
+                report_data["duplicates"] = {
+                    "findings": [{
+                        "file_a": d.file_a, "start_line_a": d.start_line_a, "end_line_a": d.end_line_a,
+                        "file_b": d.file_b, "start_line_b": d.start_line_b, "end_line_b": d.end_line_b,
+                        "similarity": d.similarity, "duplicated_lines": d.duplicated_lines,
+                    } for d in dup_rows],
+                }
+            debt_rows = db.query(TechnicalDebtFinding).filter(TechnicalDebtFinding.analysis_id == analysis_id).all()
+            if debt_rows:
+                report_data["technical_debt"] = {
+                    "items": [{
+                        "category": t.category, "severity": t.severity, "title": t.title,
+                        "evidence": t.evidence, "file": t.file, "line_start": t.line_start,
+                        "estimated_effort_hours": t.estimated_effort_hours,
+                    } for t in debt_rows],
+                    "summary": {
+                        "total_estimated_effort_hours": round(sum(t.estimated_effort_hours or 0 for t in debt_rows), 1),
+                    },
+                }
+            arch_row = db.query(ArchitectureAnalysis).filter(
+                ArchitectureAnalysis.analysis_id == analysis_id
+            ).order_by(ArchitectureAnalysis.created_at.desc()).first()
+            if arch_row and isinstance(arch_row.result, dict):
+                report_data["architecture"] = arch_row.result
+            cx_rows = db.query(ComplexityFinding).filter(ComplexityFinding.analysis_id == analysis_id).all()
+            if cx_rows:
+                report_data["complexity"] = {
+                    "findings": [{
+                        "file": c.file, "name": c.name, "line_start": c.line_start,
+                        "cyclomatic_complexity": c.cyclomatic_complexity,
+                        "length_lines": c.length_lines, "severity": c.severity,
+                    } for c in cx_rows],
+                    "summary": {
+                        "total_functions_measured": len(cx_rows),
+                        "reported": len(cx_rows),
+                        "average_complexity": (
+                            round(sum(c.cyclomatic_complexity for c in cx_rows) / len(cx_rows), 2)
+                            if cx_rows else 0.0
+                        ),
+                    },
+                }
+        except Exception as insights_report_err:
+            logger.warning(f"Could not include insights in report data: {insights_report_err}")
+
         # Generate Markdown
         md_content = generate_markdown_report(report_data)
         md_path = os.path.join(storage_dir, f"report_{analysis_id}.md")
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(md_content)
         db.add(Report(analysis_id=analysis_id, user_id=user.id, type="Markdown", filepath=md_path))
-        
+
         # Generate JSON
         json_content = generate_json_report(report_data)
         json_path = os.path.join(storage_dir, f"report_{analysis_id}.json")
         with open(json_path, "w", encoding="utf-8") as f:
             f.write(json_content)
         db.add(Report(analysis_id=analysis_id, user_id=user.id, type="JSON", filepath=json_path))
- 
+
         # Generate CSV
         csv_content = generate_csv_report(report_data)
         csv_path = os.path.join(storage_dir, f"report_{analysis_id}.csv")
         with open(csv_path, "w", encoding="utf-8") as f:
             f.write(csv_content)
         db.add(Report(analysis_id=analysis_id, user_id=user.id, type="CSV", filepath=csv_path))
- 
+
         # Generate PDF
         pdf_path = os.path.join(storage_dir, f"report_{analysis_id}.pdf")
         try:
@@ -517,17 +606,17 @@ def _run_analysis_impl(self, analysis_id: str):
             logger.info("Generated PDF report successfully.")
         except Exception as pdf_err:
             logger.error(f"Failed to generate PDF report: {pdf_err}", exc_info=True)
-            
+
         db.commit()
-        
+
         duration = time.time() - start_time
         logger.info(f"Celery analysis task completed successfully in {duration:.2f}s for analysis_id: {analysis_id}")
         update_progress(analysis_id, 100, "Analysis completed successfully!", db=db)
-        
+
     except Exception as exc:
         # check if running in Celery mode (self is a real task) or background_tasks fallback (self is None)
         is_celery_mode = self is not None and hasattr(self, 'request') and self.request is not None
-        
+
         if is_celery_mode and self.request.retries < self.max_retries and not os.getenv("TESTING") and not getattr(self.request, "called_directly", False):
             logger.info(f"Task run_analysis_task failed. Retrying (attempt {self.request.retries + 1}/{self.max_retries})...")
             db.close()
@@ -564,11 +653,11 @@ def _run_analysis_impl(self, analysis_id: str):
             finally:
                 db.close()
             return f"Failed: {str(exc)}"
-        
+
         try:
             from app.models.models import DeadLetterTask
             from app.utils.audit import log_audit_event_sync
-            
+
             dlq_task = DeadLetterTask(
                 task_id=str(self.request.id),
                 task_name="run_analysis_task",
@@ -578,14 +667,14 @@ def _run_analysis_impl(self, analysis_id: str):
             )
             db.add(dlq_task)
             db.commit()
-            
+
             log_audit_event_sync(
                 action="DLQ_TASK_CREATED",
                 details={"task_id": str(self.request.id), "error": str(exc)}
             )
         except Exception as dlq_err:
             logger.error(f"Failed to save failed task to DeadLetterTask database table: {dlq_err}")
-            
+
         try:
             redis_client.lpush(
                 "acr_dead_letter_queue",
@@ -599,7 +688,7 @@ def _run_analysis_impl(self, analysis_id: str):
             )
         except Exception as redis_err:
             logger.error(f"Failed to push task to Redis DLQ: {redis_err}")
-            
+
         update_progress(analysis_id, 100, f"failed: {str(exc)}", db=db)
         # Re-query to get a fresh object from the session
         analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()

@@ -14,6 +14,7 @@ import {
 import { useAnalysisStore } from "../store/analysisStore";
 import { useQuery } from "@tanstack/react-query";
 import type { Analysis } from "../store/analysisStore";
+import { useThemeStore } from "../store/themeStore";
 
 interface ComparisonData {
   status: string;
@@ -62,6 +63,35 @@ const staggerItem = {
 
 // ── Animated Metric Card ──
 
+// Theme-aware chart chrome: reads the CSS variables set in index.css so the
+// grid, axes and tooltips stay readable in BOTH light and dark mode.
+function useChartChrome() {
+  const { theme } = useThemeStore();
+  const vars =
+    theme === "dark"
+      ? {
+          grid: "rgba(255,255,255,0.08)",
+          axis: "#A1A1AA",
+          tooltipBg: "#18181B",
+          tooltipText: "#F4F4F5",
+          tooltipBorder: "rgba(255,255,255,0.12)",
+        }
+      : {
+          grid: "rgba(0,0,0,0.07)",
+          axis: "#525863",
+          tooltipBg: "#FFFFFF",
+          tooltipText: "#18181B",
+          tooltipBorder: "rgba(0,0,0,0.1)",
+        };
+  const tooltipStyle = {
+    backgroundColor: vars.tooltipBg,
+    color: vars.tooltipText,
+    border: `1px solid ${vars.tooltipBorder}`,
+    borderRadius: "16px",
+  } as const;
+  return { ...vars, tooltipStyle };
+}
+
 const MetricCard: React.FC<{
   icon: React.ReactNode;
   label: string;
@@ -104,6 +134,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectRepoId }) => {
   const { repositories, connectRepository } = useRepositoryStore();
   const { compareScans } = useAnalysisStore();
   const { user } = useAuthStore();
+  const chartChrome = useChartChrome();
 
   const hasLlmKey = user ? (
     user.has_groq_api_key || user.has_openai_api_key ||
@@ -364,10 +395,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectRepoId }) => {
                 {metrics?.vulnerability_trends.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={metrics.vulnerability_trends}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-                      <XAxis dataKey="date" stroke="#6E7480" fontSize={11} />
-                      <YAxis stroke="#6E7480" fontSize={11} />
-                      <Tooltip contentStyle={{ backgroundColor: "#FFFFFF", border: "1px solid rgba(0,0,0,0.08)", borderRadius: "16px" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chartChrome.grid} />
+                      <XAxis dataKey="date" stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                      <YAxis stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                      <Tooltip contentStyle={chartChrome.tooltipStyle} itemStyle={{ color: chartChrome.tooltipText }} labelStyle={{ color: chartChrome.tooltipText }} />
                       <Line type="monotone" dataKey="count" stroke="#4F7CFF" strokeWidth={2.5} dot={{ r: 3, fill: "#4F7CFF" }} activeDot={{ r: 6 }} />
                     </LineChart>
                   </ResponsiveContainer>
@@ -386,10 +417,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectRepoId }) => {
                 {metrics?.vulnerabilities_count > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={sevChartData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-                      <XAxis dataKey="name" stroke="#6E7480" fontSize={11} />
-                      <YAxis stroke="#6E7480" fontSize={11} />
-                      <Tooltip contentStyle={{ backgroundColor: "#FFFFFF", border: "1px solid rgba(0,0,0,0.08)", borderRadius: "16px" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chartChrome.grid} />
+                      <XAxis dataKey="name" stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                      <YAxis stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                      <Tooltip contentStyle={chartChrome.tooltipStyle} itemStyle={{ color: chartChrome.tooltipText }} labelStyle={{ color: chartChrome.tooltipText }} />
                       <Bar dataKey="count" radius={[8, 8, 0, 0]} barSize={36}>
                         {sevChartData.map((entry, index) => (
                           <Cell key={`cell-${index}`} fill={SEV_COLORS[entry.name] || "#4F7CFF"} />
@@ -414,10 +445,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectRepoId }) => {
                 {metrics?.health_history?.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={metrics.health_history}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-                      <XAxis dataKey="date" stroke="#6E7480" fontSize={11} />
-                      <YAxis stroke="#6E7480" fontSize={11} domain={[0, 100]} />
-                      <Tooltip contentStyle={{ backgroundColor: "#FFFFFF", border: "1px solid rgba(0,0,0,0.08)", borderRadius: "16px" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chartChrome.grid} />
+                      <XAxis dataKey="date" stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                      <YAxis stroke={chartChrome.axis} fontSize={11} domain={[0, 100]} tick={{ fill: chartChrome.axis }} />
+                      <Tooltip contentStyle={chartChrome.tooltipStyle} itemStyle={{ color: chartChrome.tooltipText }} labelStyle={{ color: chartChrome.tooltipText }} />
                       <Line type="monotone" dataKey="score" stroke="#22C55E" strokeWidth={2.5} dot={{ r: 3, fill: "#22C55E" }} activeDot={{ r: 6 }} />
                     </LineChart>
                   </ResponsiveContainer>
@@ -432,10 +463,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectRepoId }) => {
                 {metrics?.security_score_history?.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={metrics.security_score_history}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-                      <XAxis dataKey="date" stroke="#6E7480" fontSize={11} />
-                      <YAxis stroke="#6E7480" fontSize={11} domain={[0, 100]} />
-                      <Tooltip contentStyle={{ backgroundColor: "#FFFFFF", border: "1px solid rgba(0,0,0,0.08)", borderRadius: "16px" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chartChrome.grid} />
+                      <XAxis dataKey="date" stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                      <YAxis stroke={chartChrome.axis} fontSize={11} domain={[0, 100]} tick={{ fill: chartChrome.axis }} />
+                      <Tooltip contentStyle={chartChrome.tooltipStyle} itemStyle={{ color: chartChrome.tooltipText }} labelStyle={{ color: chartChrome.tooltipText }} />
                       <Line type="monotone" dataKey="score" stroke="#EF4444" strokeWidth={2.5} dot={{ r: 3, fill: "#EF4444" }} activeDot={{ r: 6 }} />
                     </LineChart>
                   </ResponsiveContainer>
@@ -455,10 +486,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectRepoId }) => {
                   <>
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={[{ name: "Tokens", Prompt: metrics.token_consumption.prompt_tokens || 0, Completion: metrics.token_consumption.completion_tokens || 0 }]}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-                        <XAxis dataKey="name" stroke="#6E7480" fontSize={11} />
-                        <YAxis stroke="#6E7480" fontSize={11} />
-                        <Tooltip contentStyle={{ backgroundColor: "#FFFFFF", border: "1px solid rgba(0,0,0,0.08)", borderRadius: "16px" }} formatter={(value: number) => [value.toLocaleString(), undefined]} />
+                        <CartesianGrid strokeDasharray="3 3" stroke={chartChrome.grid} />
+                        <XAxis dataKey="name" stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                        <YAxis stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                        <Tooltip contentStyle={chartChrome.tooltipStyle} itemStyle={{ color: chartChrome.tooltipText }} labelStyle={{ color: chartChrome.tooltipText }} formatter={(value: number) => [value.toLocaleString(), undefined]} />
                         <Bar dataKey="Prompt" fill="#4F7CFF" stackId="a" name="Prompt Tokens" radius={[0, 0, 0, 0]} />
                         <Bar dataKey="Completion" fill="#7C5CFF" stackId="a" radius={[8, 8, 0, 0]} name="Completion Tokens" />
                       </BarChart>
@@ -479,10 +510,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectRepoId }) => {
                 {metrics?.model_usage && Object.keys(metrics.model_usage).length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={Object.entries(metrics.model_usage).map(([name, count]) => ({ name, count }))} layout="vertical">
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-                      <XAxis type="number" stroke="#6E7480" fontSize={11} />
-                      <YAxis dataKey="name" type="category" stroke="#6E7480" fontSize={10} width={100} />
-                      <Tooltip contentStyle={{ backgroundColor: "#FFFFFF", border: "1px solid rgba(0,0,0,0.08)", borderRadius: "16px" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chartChrome.grid} />
+                      <XAxis type="number" stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                      <YAxis dataKey="name" type="category" stroke={chartChrome.axis} fontSize={10} width={100} tick={{ fill: chartChrome.axis }} />
+                      <Tooltip contentStyle={chartChrome.tooltipStyle} itemStyle={{ color: chartChrome.tooltipText }} labelStyle={{ color: chartChrome.tooltipText }} />
                       <Bar dataKey="count" fill="#7C5CFF" radius={[0, 8, 8, 0]} barSize={20} />
                     </BarChart>
                   </ResponsiveContainer>
@@ -593,10 +624,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectRepoId }) => {
                       { name: "Security", before: comparison.security.a, after: comparison.security.b },
                       { name: "Code Smells", before: comparison.code_smells.a, after: comparison.code_smells.b }
                     ]}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-                      <XAxis dataKey="name" stroke="#6E7480" fontSize={11} />
-                      <YAxis stroke="#6E7480" fontSize={11} />
-                      <Tooltip contentStyle={{ backgroundColor: "#FFFFFF", border: "1px solid rgba(0,0,0,0.08)", borderRadius: "16px" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chartChrome.grid} />
+                      <XAxis dataKey="name" stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                      <YAxis stroke={chartChrome.axis} fontSize={11} tick={{ fill: chartChrome.axis }} />
+                      <Tooltip contentStyle={chartChrome.tooltipStyle} itemStyle={{ color: chartChrome.tooltipText }} labelStyle={{ color: chartChrome.tooltipText }} />
                       <Bar dataKey="before" fill="#EF4444" radius={[8, 8, 0, 0]} name="Before" />
                       <Bar dataKey="after" fill="#22C55E" radius={[8, 8, 0, 0]} name="After" />
                     </BarChart>

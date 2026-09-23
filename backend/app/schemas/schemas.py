@@ -180,6 +180,7 @@ class SecurityFindingOut(BaseModel):
     code_snippet: Optional[str] = None
     issue_explanation: Optional[str] = None
     confidence_score: Optional[int] = None
+    source: Optional[str] = None  # ai_analysis | static_analysis
 
     model_config = {"from_attributes": True}
 
@@ -200,6 +201,7 @@ class CodeSmellOut(BaseModel):
     code_snippet: Optional[str] = None
     issue_explanation: Optional[str] = None
     confidence_score: Optional[int] = None
+    source: Optional[str] = None  # ai_analysis | static_analysis
 
     model_config = {"from_attributes": True}
 

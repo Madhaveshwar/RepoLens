@@ -175,6 +175,97 @@ def generate_markdown_report(data: dict[str, object]) -> str:
         else:
             md.append("No qualitative analysis available.")
 
+    # ── Optional insight sections (evidence-based, only when present) ──
+    dependencies = data.get("dependencies") or {}
+    if isinstance(dependencies, dict) and dependencies.get("findings"):
+        md.append("\n## Dependency Vulnerabilities")
+        md.append("| Package | Ecosystem | Installed | Status | Severity | Advisory | Recommended |")
+        md.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for d in dependencies["findings"]:
+            md.append(
+                f"| `{d.get('package_name')}` | {d.get('ecosystem')} | "
+                f"{d.get('resolved_version') or d.get('version_spec') or '?'} | "
+                f"{d.get('status')} | {d.get('severity') or '-'} | "
+                f"{d.get('advisory_id') or '-'} | {d.get('recommended_version') or '-'} |"
+            )
+        summary = dependencies.get("summary") or {}
+        md.append(
+            f"\n**Dependency summary:** {summary.get('total', 0)} parsed — "
+            f"{summary.get('known_vulnerable', 0)} with known vulnerabilities, "
+            f"{summary.get('outdated', 0)} outdated, {summary.get('unknown', 0)} unverified.\n"
+        )
+
+    duplicates = data.get("duplicates") or {}
+    if isinstance(duplicates, dict) and duplicates.get("findings"):
+        md.append("\n## Duplicate Code")
+        for d in duplicates["findings"][:30]:
+            md.append(
+                f"- `{d['file_a']}:{d['start_line_a']}-{d['end_line_a']}` ≈ "
+                f"`{d['file_b']}:{d['start_line_b']}-{d['end_line_b']}` — "
+                f"{d['similarity']}% similar, {d['duplicated_lines']} lines"
+            )
+        md.append("")
+
+    technical_debt = data.get("technical_debt") or {}
+    if isinstance(technical_debt, dict) and technical_debt.get("items"):
+        summary = technical_debt.get("summary") or {}
+        md.append("\n## Technical Debt")
+        md.append(f"- **Overall debt score:** {summary.get('overall_debt_score', 'N/A')}/100")
+        md.append(f"- **Estimated remediation effort:** ~{summary.get('total_estimated_effort_hours', 0)} hours "
+                  "*(heuristic estimate — not measured actuals)*")
+        md.append("\n| Category | Severity | Item | Evidence | Est. Hours |")
+        md.append("| --- | --- | --- | --- | --- |")
+        for item in technical_debt["items"]:
+            md.append(
+                f"| {item.get('category')} | **{item.get('severity')}** | {item.get('title')} | "
+                f"{item.get('evidence')} | {item.get('estimated_effort_hours', '-')} |"
+            )
+        md.append("")
+
+    architecture = data.get("architecture") or {}
+    if isinstance(architecture, dict) and architecture.get("frameworks") is not None:
+        md.append("\n## Architecture Analysis")
+        md.append("*All technologies below were detected from actual repository files.*\n")
+        frameworks = architecture.get("frameworks") or []
+        if frameworks:
+            md.append("**Detected technologies:** "
+                      + ", ".join(f"{f['name']} ({f['category']})" for f in frameworks))
+        else:
+            md.append("**Detected technologies:** None detected from repository evidence.")
+        layers = architecture.get("layers") or []
+        if layers:
+            md.append("\n**Detected layers:**")
+            for layer in layers:
+                md.append(f"- {layer['layer']}: {', '.join(layer['evidence_directories'])}")
+        components = architecture.get("components") or []
+        if components:
+            md.append("\n**Main modules (by file count): "
+                      + ", ".join(f"{c['name']} ({c['file_count']} files)" for c in components[:8]) + "**")
+        concerns = architecture.get("concerns") or []
+        if concerns:
+            md.append("\n**Potential architectural concerns (evidence-based):**")
+            for c in concerns:
+                md.append(f"- {c.get('concern')}")
+        md.append("")
+
+    complexity = data.get("complexity") or {}
+    if isinstance(complexity, dict) and complexity.get("findings"):
+        summary = complexity.get("summary") or {}
+        md.append("\n## Code Complexity")
+        md.append(
+            f"*Static analysis measured {summary.get('total_functions_measured', 0)} functions; "
+            f"{summary.get('reported', 0)} at or above the reporting threshold "
+            f"(average CC {summary.get('average_complexity', 0)}).*\n"
+        )
+        md.append("| File | Function | Line | CC | Length | Severity |")
+        md.append("| --- | --- | --- | --- | --- | --- |")
+        for c in complexity["findings"][:30]:
+            md.append(
+                f"| `{c.get('file')}` | {c.get('name')} | {c.get('line_start')} | "
+                f"{c.get('cyclomatic_complexity')} | {c.get('length_lines')} | **{c.get('severity')}** |"
+            )
+        md.append("")
+
     return "\n".join(md)
 
 def generate_json_report(data: dict[str, object]) -> str:

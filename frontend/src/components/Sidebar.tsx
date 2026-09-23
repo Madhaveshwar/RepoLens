@@ -1,8 +1,9 @@
 import React, { useState } from "react";
 import { useAuthStore } from "../store/authStore";
+import { useThemeStore } from "../store/themeStore";
 import {
   LayoutDashboard, FolderKanban, Settings, LogOut,
-  Shield, ChevronLeft
+  Shield, ChevronLeft, Sun, Moon
 } from "lucide-react";
 
 interface SidebarProps {
@@ -12,6 +13,7 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
   const { user, logout } = useAuthStore();
+  const { theme, toggleTheme } = useThemeStore();
   const [collapsed, setCollapsed] = useState(false);
 
   const menuItems = [
@@ -74,6 +76,22 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             );
           })}
         </nav>
+
+        {/* Appearance: Light/Dark toggle */}
+        <div className="px-3 pb-1">
+          <button
+            onClick={toggleTheme}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all duration-300 text-zinc-700 hover:text-zinc-950 hover:bg-zinc-100 border border-transparent hover:scale-[1.02] ${collapsed ? 'justify-center' : ''}`}
+            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            {theme === "dark" ? <Sun className="w-4.5 h-4.5 flex-shrink-0" /> : <Moon className="w-4.5 h-4.5 flex-shrink-0" />}
+            {!collapsed && (
+              <span className="text-xs font-bold truncate">
+                {theme === "dark" ? "Light Mode" : "Dark Mode"}
+              </span>
+            )}
+          </button>
+        </div>
 
         {/* User profile & logout */}
         <div className="p-3 border-t border-zinc-200/40 mt-auto">

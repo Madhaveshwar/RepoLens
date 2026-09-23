@@ -59,9 +59,12 @@ Your role is to help users understand:
 - Do not assume command injection, SQL injection, path traversal etc. unless the actual finding states it.
 - Do not claim tools or scans were used that were not part of RepoLens AI.
 
-**Response formatting:**
-- Use clean Markdown: ## headings, bullet lists, **bold**, tables where useful, and ```code blocks``` for code.
-- Keep answers concise and scannable (aim for under 350 words unless depth is requested).
+**Answer style (efficiency rules, highest priority after grounding):**
+- Answer the user's EXACT question in the first sentence. Do not open with restatements, disclaimers, or summaries of the repository context.
+- Be concise: default to under 200 words unless the user explicitly asks for detail or depth.
+- Do not repeat the repository context back (do not list all findings/files again); cite only the 1-3 pieces of evidence that answer the question, with file paths/line numbers when available.
+- Never pad with generic advice, filler sentences, or repetition of earlier turns.
+- When reusing results already present in the context (scan stats, findings, scores), prefer them over producing new numbers.
 
 **Guidelines:**
 1. Be concise but thorough. Use simple language for beginners and precise terms for experts.
@@ -81,7 +84,7 @@ Your role is to help users understand:
 - Be encouraging and educational
 
 **Response Format:**
-Respond in markdown with clear sections. Keep responses under 300 words unless more detail is needed."""
+Respond in markdown with clear sections. Keep responses under 200 words unless more detail is needed; lead with the direct answer, then the key evidence, then (only if asked) next steps."""
 
 
 # ── Resolve provider and API key (same pattern as analysis.py) ──
@@ -419,7 +422,7 @@ async def chat_ask(
             messages=messages,
             model=model,
             temperature=0.3,
-            max_tokens=2048,
+            max_tokens=900,
         )
 
         reply = chat_completion.choices[0].message.content or "I'm sorry, I couldn't generate a response."
@@ -448,7 +451,7 @@ async def _stream_tokens(
     messages: list[dict],
     current_page: Optional[str] = None,
     temperature: float = 0.3,
-    max_tokens: int = 2048,
+    max_tokens: int = 900,
 ) -> AsyncGenerator[str, None]:
     """Yield SSE-formatted token chunks from the LLM stream."""
     try:
@@ -528,7 +531,7 @@ async def chat_ask_stream(
             messages=messages,
             current_page=req.current_page,
             temperature=0.3,
-            max_tokens=2048,
+            max_tokens=900,
         ),
         media_type="text/event-stream",
         headers={

@@ -8,17 +8,31 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Premium light palette
-        background: "#FAFAFA",
-        "background-elevated": "#F3F4F6",
-        "background-raised": "#EEF0F3",
-        surface: "#FFFFFF",
-        "surface-hover": "#F8F9FB",
-        "surface-elevated": "#F0F2F5",
-        border: "#E5E7EB",
-        "border-light": "#D1D5DB",
-        muted: "#9CA3AF",
-        "muted-light": "#6B7280",
+        // Theme-aware tokens — resolved from CSS variables that flip with
+        // html.dark (see index.css). Accents stay constant across themes.
+        background: ({ opacityValue }) =>
+          opacityValue !== undefined
+            ? `rgb(var(--rl-bg) / ${opacityValue})`
+            : `rgb(var(--rl-bg, 250 250 250))`,
+        "background-elevated": "var(--rl-bg-elevated)",
+        "background-raised": "var(--rl-bg-raised)",
+        surface: "var(--rl-surface)",
+        "surface-hover": "var(--rl-surface-hover)",
+        "surface-elevated": "var(--rl-surface-elevated)",
+        border: ({ opacityValue }) =>
+          opacityValue !== undefined
+            ? `rgb(var(--rl-border) / ${opacityValue})`
+            : `rgb(var(--rl-border, 229 231 235))`,
+        "border-light": "var(--rl-border-strong)",
+        "border-strong": "var(--rl-border-strong)",
+        muted: ({ opacityValue }) =>
+          opacityValue !== undefined
+            ? `rgb(var(--rl-muted) / ${opacityValue})`
+            : `rgb(var(--rl-muted, 107 114 128))`,
+        "muted-light": ({ opacityValue }) =>
+          opacityValue !== undefined
+            ? `rgb(var(--rl-muted-light) / ${opacityValue})`
+            : `rgb(var(--rl-muted-light, 82 88 99))`,
         // Accent palette (keep same brand colors)
         accent: {
           blue: "#4F7CFF",
@@ -48,8 +62,8 @@ export default {
         '4xl': '24px',
       },
       backgroundImage: {
-        'glass-gradient': 'linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.7) 100%)',
-        'glass-hover': 'linear-gradient(135deg, rgba(255,255,255,1) 0%, rgba(255,255,255,0.85) 100%)',
+        'glass-gradient': 'linear-gradient(135deg, var(--rl-glass-a) 0%, var(--rl-glass-b) 100%)',
+        'glass-hover': 'linear-gradient(135deg, var(--rl-glass-a) 0%, var(--rl-glass-b) 100%)',
         'accent-gradient': 'linear-gradient(135deg, #4F7CFF 0%, #7C5CFF 50%, #06B6D4 100%)',
         'accent-gradient-subtle': 'linear-gradient(135deg, rgba(79,124,255,0.08) 0%, rgba(124,92,255,0.08) 100%)',
         'card-glow-blue': 'linear-gradient(135deg, rgba(79,124,255,0.04) 0%, transparent 100%)',
@@ -59,12 +73,12 @@ export default {
         'shimmer': 'linear-gradient(90deg, transparent 0%, rgba(0,0,0,0.03) 50%, transparent 100%)',
       },
       boxShadow: {
-        'glass': '0 1px 3px rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.03)',
+        'glass': 'var(--rl-shadow-glass)',
         'glass-sm': '0 1px 2px rgba(0,0,0,0.04)',
-        'glass-lg': '0 4px 16px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.04)',
+        'glass-lg': 'var(--rl-shadow-glass-lg)',
         'glow-blue': '0 0 16px rgba(79,124,255,0.15)',
-        'card': '0 1px 3px rgba(0,0,0,0.06)',
-        'card-hover': '0 4px 12px rgba(0,0,0,0.08)',
+        'card': 'var(--rl-shadow-glass)',
+        'card-hover': 'var(--rl-shadow-glass-lg)',
         'elevated': '0 8px 24px rgba(0,0,0,0.08)',
       },
       backdropBlur: {

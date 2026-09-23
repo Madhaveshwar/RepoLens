@@ -22,9 +22,17 @@ interface AuthState {
   user: UserProfile | null;
   loading: boolean;
   error: string | null;
+  /**
+   * Set right after a successful interactive login so the app can open the
+   * Settings page first. It is NOT set when a session is restored from a
+   * saved JWT (page refresh), so refresh behavior is unchanged.
+   */
+  justLoggedIn: boolean;
   setToken: (token: string | null) => void;
   setUser: (user: UserProfile | null) => void;
   initialize: () => Promise<void>;
+  markJustLoggedIn: () => void;
+  clearJustLoggedIn: () => void;
   logout: () => void;
 }
 
@@ -33,6 +41,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   loading: false,
   error: null,
+  justLoggedIn: false,
 
   setToken: (token) => {
     if (token) {
@@ -46,6 +55,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   setUser: (user) => set({ user }),
+
+  markJustLoggedIn: () => set({ justLoggedIn: true }),
+
+  clearJustLoggedIn: () => {
+    if (get().justLoggedIn) set({ justLoggedIn: false });
+  },
 
   initialize: async () => {
     const token = get().token;
@@ -67,7 +82,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: () => {
     get().setToken(null);
-    set({ user: null });
+    set({ user: null, justLoggedIn: false });
   }
 }));
 

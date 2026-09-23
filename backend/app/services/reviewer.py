@@ -1231,6 +1231,7 @@ def review_entire_repository(
                     "risk_level": item.get("risk_level", item.get("severity", "Medium")),
                     "before_code": item.get("before_code", ""),
                     "after_code": item.get("after_code", ""),
+                    "source": "ai_analysis",
                 })
 
         security_issues = []
@@ -1252,6 +1253,7 @@ def review_entire_repository(
                     "risk_level": item.get("risk_level", item.get("severity", "Medium")),
                     "before_code": item.get("before_code", ""),
                     "after_code": item.get("after_code", ""),
+                    "source": "ai_analysis",
                 })
 
         smell_issues = []
@@ -1273,6 +1275,7 @@ def review_entire_repository(
                     "risk_level": item.get("risk_level", item.get("severity", "Low")),
                     "before_code": item.get("before_code", ""),
                     "after_code": item.get("after_code", ""),
+                    "source": "ai_analysis",
                 })
 
         # ── Run static scanners to supplement/correct LLM findings ──
@@ -1306,6 +1309,7 @@ def review_entire_repository(
                     "risk_level": sf.get("risk_level", sf.get("severity", "Medium")),
                     "before_code": sf.get("before_code", ""),
                     "after_code": sf.get("after_code", ""),
+                    "source": "static_analysis",
                 })
                 validated_count += 1
 
@@ -1324,6 +1328,7 @@ def review_entire_repository(
                     "risk_level": sf.get("risk_level", sf.get("severity", "Medium")),
                     "before_code": sf.get("before_code", ""),
                     "after_code": sf.get("after_code", ""),
+                    "source": "static_analysis",
                 })
                 validated_count += 1
 
