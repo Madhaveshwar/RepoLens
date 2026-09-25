@@ -2,6 +2,7 @@ import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import axios from "../../lib/api";
 import { Loader2, Network, Boxes, GitBranch, Layers3, Link2, ArrowRight, AlertOctagon } from "lucide-react";
+import { formatDateTime } from "../../lib/datetime";
 
 interface Framework {
   name: string;
@@ -230,7 +231,7 @@ export const ArchitecturePanel: React.FC<{ repoId: string }> = ({ repoId }) => {
           <span key={lang}>{lang}: {count}</span>
         ))}
         {data.generated_at && (
-          <span className="ml-auto">Generated {new Date(data.generated_at).toLocaleString()}</span>
+          <span className="ml-auto">Generated {formatDateTime(data.generated_at)}</span>
         )}
       </div>
       {r.summary.structure.tree_truncated && (

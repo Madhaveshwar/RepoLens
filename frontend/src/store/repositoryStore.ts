@@ -1,5 +1,7 @@
 ﻿import { create } from "zustand";
 import axios from "../lib/api";
+import { queryClient } from "../queryClient";
+import { toast } from "../components/Toast";
 
 export interface Repository {
   id: string;
@@ -73,6 +75,12 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
         repositories: [...state.repositories.filter((r) => r.id !== res.data.id), res.data],
         error: null
       }));
+      // Keep the query cache consistent so remounts don't drop the new repo.
+      queryClient.setQueryData(["repositories"], (old: any) => {
+        if (!Array.isArray(old)) return old;
+        return [...old.filter((r: any) => r.id !== res.data.id), res.data];
+      });
+      toast.success(`Repository ${res.data.name} connected successfully.`);
       return res.data;
     } catch (err: any) {
       const msg = err.response?.data?.detail || "Failed to connect repository";
@@ -103,14 +111,30 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
     set({ loading: true });
     try {
       await axios.delete(`/repositories/${id}`);
+      // Update Zustand immediately (no refresh needed) ...
       set((state) => ({
         repositories: state.repositories.filter((r) => r.id !== id),
         activeRepo: state.activeRepo?.id === id ? null : state.activeRepo,
         error: null
       }));
+      // Clear the persisted active repo if it was the one deleted, so a
+      // refresh cannot restore a deleted repository.
+      try {
+        const saved = JSON.parse(localStorage.getItem("repolens-active-repo") || "null");
+        if (saved && saved.id === id) localStorage.removeItem("repolens-active-repo");
+      } catch { /* ignore */ }
+      // ... AND sync the React Query cache, otherwise the Dashboard's
+      // "cache → store" effect resurrects the deleted repo from stale cache.
+      queryClient.setQueryData(["repositories"], (old: any) =>
+        Array.isArray(old) ? old.filter((r: any) => r.id !== id) : old
+      );
+      // Metrics (repo counts etc.) must refresh too.
+      queryClient.invalidateQueries({ queryKey: ["dashboardMetrics"] });
+      toast.success("Repository deleted successfully.");
     } catch (err: any) {
       const msg = err.response?.data?.detail || "Failed to delete repository";
       set({ error: msg });
+      toast.error(msg);
       throw new Error(msg);
     } finally {
       set({ loading: false });
@@ -126,9 +150,15 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
         activeRepo: state.activeRepo?.id === id ? null : state.activeRepo,
         error: null
       }));
+      queryClient.setQueryData(["repositories"], (old: any) =>
+        Array.isArray(old) ? old.filter((r: any) => r.id !== id) : old
+      );
+      queryClient.invalidateQueries({ queryKey: ["dashboardMetrics"] });
+      toast.success("Repository disconnected successfully.");
     } catch (err: any) {
       const msg = err.response?.data?.detail || "Failed to disconnect repository";
       set({ error: msg });
+      toast.error(msg);
       throw new Error(msg);
     } finally {
       set({ loading: false });

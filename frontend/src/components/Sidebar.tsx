@@ -2,9 +2,10 @@ import React, { useState } from "react";
 import { useAuthStore } from "../store/authStore";
 import { useThemeStore } from "../store/themeStore";
 import {
-  LayoutDashboard, FolderKanban, Settings, LogOut,
+  LayoutDashboard, FolderKanban, Settings, LogOut, HelpCircle,
   Shield, ChevronLeft, Sun, Moon
 } from "lucide-react";
+import { toast } from "./Toast";
 
 interface SidebarProps {
   activeTab: string;
@@ -16,9 +17,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   const { theme, toggleTheme } = useThemeStore();
   const [collapsed, setCollapsed] = useState(false);
 
+  const handleLogout = () => {
+    logout();
+    toast.info("Logged out successfully.");
+  };
+
   const menuItems = [
     { id: "dashboard", name: "Dashboard", icon: LayoutDashboard },
     { id: "repositories", name: "Repositories", icon: FolderKanban },
+    { id: "help", name: "Help", icon: HelpCircle },
     { id: "settings", name: "Settings", icon: Settings },
   ];
 
@@ -29,9 +36,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
         {/* Collapse toggle */}
         <button
           onClick={() => setCollapsed(!collapsed)}
-          className="absolute -right-3 top-10 w-6 h-6 bg-white border border-zinc-200 rounded-full flex items-center justify-center text-zinc-400 hover:text-zinc-600 hover:border-zinc-300 z-10 transition-all shadow-sm"
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!collapsed}
+          className="absolute -right-3 top-10 w-6 h-6 bg-white border border-zinc-200 rounded-full flex items-center justify-center text-zinc-400 hover:text-zinc-600 hover:border-zinc-300 z-10 transition-all shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
         >
-          <ChevronLeft className={`w-3.5 h-3.5 transition-transform duration-300 ${collapsed ? 'rotate-180' : ''}`} />
+          <ChevronLeft className={`w-3.5 h-3.5 transition-transform duration-300 ${collapsed ? 'rotate-180' : ''}`} aria-hidden="true" />
         </button>
 
         {/* Brand */}
@@ -56,7 +65,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
               <button
                 key={item.id}
                 onClick={() => setActiveTab(item.id)}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all duration-300 group ${
+                aria-current={isActive ? "page" : undefined}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all duration-300 group focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue ${
                   isActive
                     ? "bg-accent-blue/10 border border-accent-blue/25 shadow-sm text-accent-blue font-bold"
                     : "text-zinc-700 hover:text-zinc-950 hover:bg-zinc-100 border border-transparent hover:scale-[1.02]"
@@ -65,7 +75,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
               >
                 <Icon className={`w-4.5 h-4.5 flex-shrink-0 transition-transform duration-300 ${
                   isActive ? 'scale-110' : 'group-hover:scale-110'
-                }`} />
+                }`} aria-hidden="true" />
                 {!collapsed && (
                   <span className="text-xs font-bold truncate">{item.name}</span>
                 )}
@@ -81,10 +91,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
         <div className="px-3 pb-1">
           <button
             onClick={toggleTheme}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all duration-300 text-zinc-700 hover:text-zinc-950 hover:bg-zinc-100 border border-transparent hover:scale-[1.02] ${collapsed ? 'justify-center' : ''}`}
+            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            aria-pressed={theme === "dark"}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all duration-300 text-zinc-700 hover:text-zinc-950 hover:bg-zinc-100 border border-transparent hover:scale-[1.02] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue ${collapsed ? 'justify-center' : ''}`}
             title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           >
-            {theme === "dark" ? <Sun className="w-4.5 h-4.5 flex-shrink-0" /> : <Moon className="w-4.5 h-4.5 flex-shrink-0" />}
+            {theme === "dark" ? <Sun className="w-4.5 h-4.5 flex-shrink-0" aria-hidden="true" /> : <Moon className="w-4.5 h-4.5 flex-shrink-0" aria-hidden="true" />}
             {!collapsed && (
               <span className="text-xs font-bold truncate">
                 {theme === "dark" ? "Light Mode" : "Dark Mode"}
@@ -108,8 +120,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
           </div>
 
           <button
-            onClick={logout}
-            className={`w-full flex items-center gap-3 px-4 py-3 mt-1 text-sm font-bold text-red-600 hover:text-red-700 hover:bg-red-50 rounded-2xl transition-all duration-300 ${collapsed ? 'justify-center' : ''}`}
+            onClick={handleLogout}
+            aria-label="Log out of RepoLens AI"
+            className={`w-full flex items-center gap-3 px-4 py-3 mt-1 text-sm font-bold text-red-600 hover:text-red-700 hover:bg-red-50 rounded-2xl transition-all duration-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue ${collapsed ? 'justify-center' : ''}`}
             title="Log Out"
           >
             <LogOut className="w-4 h-4 flex-shrink-0" />

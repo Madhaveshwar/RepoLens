@@ -1,7 +1,35 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_serializer
 from typing import List, Optional, Dict, Any
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timezone
+
+# ── UTC timestamp serialization ─────────────────────────────────────────────
+# The database stores naive datetimes in UTC (SQLAlchemy columns without a
+# timezone). When Pydantic serializes a naive datetime it emits
+# "2026-09-24T18:23:41" — no timezone marker. JavaScript's new Date() then
+# parses that string as LOCAL time, so the UTC value is displayed unconverted
+# (the reported 5h30m off-by-timezone bug).
+#
+# Fix: serialize every schema datetime as timezone-aware ISO 8601 UTC
+# ("2026-09-24T18:23:41Z"). Naive values are UTC by project convention, so we
+# ATTACH the UTC marker without shifting the clock. Aware values pass through
+# unchanged. The frontend then converts once, correctly, to local time.
+def _serialize_utc(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat().replace("+00:00", "Z")
+
+
+class UTCTimestampMixin(BaseModel):
+    """Mixin: all datetime fields serialize as timezone-aware ISO 8601 UTC.
+
+    Inherit AFTER the field declarations (e.g. class X(BaseModel, UTCTimestampMixin)).
+    """
+    @field_serializer("*")
+    def _serialize_datetimes_utc(self, value: Any, info) -> Any:
+        if isinstance(value, datetime):
+            return _serialize_utc(value)
+        return value
 
 # Auth Schemas
 class UserCreate(BaseModel):
@@ -16,7 +44,7 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
-class UserOut(BaseModel):
+class UserOut(UTCTimestampMixin, BaseModel):
     id: UUID
     email: EmailStr
     created_at: datetime
@@ -32,6 +60,7 @@ class UserOut(BaseModel):
     llm_max_tokens: Optional[int] = None
 
     model_config = {"from_attributes": True}
+
 
 class CredentialsUpdate(BaseModel):
     github_pat: Optional[str] = None
@@ -85,7 +114,7 @@ class GitAutomationRequest(BaseModel):
 class ApiKeyCreate(BaseModel):
     name: str
 
-class ApiKeyOut(BaseModel):
+class ApiKeyOut(UTCTimestampMixin, BaseModel):
     id: UUID
     name: str
     key_prefix: str
@@ -94,6 +123,7 @@ class ApiKeyOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+
 class ApiKeyGenerated(ApiKeyOut):
     plain_key: str
 
@@ -101,7 +131,7 @@ class ApiKeyGenerated(ApiKeyOut):
 class RepositoryConnect(BaseModel):
     url: str
 
-class RepositoryOut(BaseModel):
+class RepositoryOut(UTCTimestampMixin, BaseModel):
     id: UUID
     name: str
     description: Optional[str] = None
@@ -119,8 +149,9 @@ class RepositoryOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+
 # PR Schemas
-class PullRequestOut(BaseModel):
+class PullRequestOut(UTCTimestampMixin, BaseModel):
     id: UUID
     number: int
     title: str
@@ -134,12 +165,13 @@ class PullRequestOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+
 # Analysis & Finding Schemas
 class AnalysisTrigger(BaseModel):
     repository_id: UUID
     pr_number: Optional[int] = None
 
-class AnalysisOut(BaseModel):
+class AnalysisOut(UTCTimestampMixin, BaseModel):
     id: UUID
     repository_id: UUID
     pull_request_id: Optional[UUID] = None
@@ -163,6 +195,7 @@ class AnalysisOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+
 class SecurityFindingOut(BaseModel):
     id: UUID
     analysis_id: UUID
@@ -183,6 +216,7 @@ class SecurityFindingOut(BaseModel):
     source: Optional[str] = None  # ai_analysis | static_analysis
 
     model_config = {"from_attributes": True}
+
 
 class CodeSmellOut(BaseModel):
     id: UUID
@@ -205,6 +239,7 @@ class CodeSmellOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+
 class TestSuggestionOut(BaseModel):
     id: UUID
     analysis_id: UUID
@@ -212,6 +247,7 @@ class TestSuggestionOut(BaseModel):
     content: str
 
     model_config = {"from_attributes": True}
+
 
 class HealthScoreOut(BaseModel):
     id: UUID
@@ -228,14 +264,16 @@ class HealthScoreOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+
 # Report Schemas
-class ReportOut(BaseModel):
+class ReportOut(UTCTimestampMixin, BaseModel):
     id: UUID
     analysis_id: UUID
     type: str
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
 
 # Combined Dashboard Metrics Schema
 class DashboardMetrics(BaseModel):
@@ -253,6 +291,10 @@ class DashboardMetrics(BaseModel):
     average_scan_duration: float
     token_consumption: Dict[str, int]
     model_usage: Dict[str, int]
+    # Latest completed scan snapshot for the simplified dashboard:
+    # health, branch/commit freshness, "what needs attention" counts and
+    # top recommendations — all derived from persisted rows (never faked).
+    latest_scan_summary: Optional[Dict[str, Any]] = None
 
 
 class FixFindingRequest(BaseModel):
@@ -281,7 +323,7 @@ class FixFindingResponse(BaseModel):
 # These schemas were removed because this project does not modify repositories.
 
 
-class AuditLogOut(BaseModel):
+class AuditLogOut(UTCTimestampMixin, BaseModel):
     id: UUID
     user_id: Optional[UUID] = None
     action: str
@@ -290,6 +332,7 @@ class AuditLogOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
 
 class ValidateFixCodeRequest(BaseModel):
     code: str
@@ -335,6 +378,7 @@ class DeadLetterTaskOut(BaseModel):
     resolved_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
 
 
 # Password Reset Schemas

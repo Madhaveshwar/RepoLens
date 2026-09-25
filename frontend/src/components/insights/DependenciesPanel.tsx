@@ -2,6 +2,8 @@ import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import axios from "../../lib/api";
 import { Loader2, PackageSearch, ExternalLink } from "lucide-react";
+import { formatDateTime } from "../../lib/datetime";
+import { Pagination } from "../Pagination";
 
 interface DependencyFinding {
   id: string;
@@ -79,6 +81,14 @@ export const DependenciesPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
     [findings, severity, ecosystem, statusFilter]
   );
 
+  // Pagination — resets to page 1 when filters change.
+  const DEP_PAGE_SIZE = 15;
+  const [depPage, setDepPage] = useState(1);
+  React.useEffect(() => { setDepPage(1); }, [severity, ecosystem, statusFilter]);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / DEP_PAGE_SIZE));
+  const safePage = Math.min(depPage, totalPages);
+  const pageItems = filtered.slice((safePage - 1) * DEP_PAGE_SIZE, safePage * DEP_PAGE_SIZE);
+
   if (isLoading) {
     return (
       <div className="glass-card p-10 flex flex-col items-center gap-3">
@@ -114,7 +124,7 @@ export const DependenciesPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
           </h3>
           {data.generated_at && (
             <p className="text-[10px] text-zinc-500 mt-0.5">
-              From scan {new Date(data.generated_at).toLocaleString()}
+              From scan {formatDateTime(data.generated_at)}
             </p>
           )}
         </div>
@@ -200,7 +210,7 @@ export const DependenciesPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((f) => {
+                {pageItems.map((f) => {
                   const meta = STATUS_META[f.status] || STATUS_META.unknown;
                   return (
                     <tr key={f.id} className="border-b border-border/20 text-xs align-top hover:bg-zinc-50/50">
@@ -255,6 +265,14 @@ export const DependenciesPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
               </tbody>
             </table>
           </div>
+
+          <Pagination
+            page={depPage}
+            pageSize={DEP_PAGE_SIZE}
+            totalItems={filtered.length}
+            onPageChange={setDepPage}
+            itemLabel="dependencies"
+          />
 
           {data.manifests && data.manifests.length > 0 && (
             <div>

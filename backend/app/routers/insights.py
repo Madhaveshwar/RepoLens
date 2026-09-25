@@ -27,6 +27,7 @@ import uuid
 from app.database.database import get_async_db
 from app.models.models import (
     User, Repository, Analysis,
+    SecurityFinding, CodeSmell, HealthScore,
     DependencyFinding, DuplicateCodeFinding, TechnicalDebtFinding,
     ArchitectureAnalysis, ComplexityFinding, RepositoryHealthSnapshot,
     PullRequestReview, CommitAnalysis,
@@ -84,6 +85,166 @@ def _github_service_or_403(current_user: User) -> GitHubService:
             detail="GitHub Personal Access Token is not configured. Add one in Settings."
         )
     return GitHubService(token=pat)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 0. REPOSITORY OVERVIEW (executive summary of the latest completed scan)
+# ══════════════════════════════════════════════════════════════════════
+
+@router.get("/{id}/overview")
+async def get_repository_overview(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Executive summary of the latest completed scan for this repository.
+
+    Every number comes from persisted database rows — nothing is estimated
+    or hard-coded. When a piece of data does not exist (e.g. no scan has
+    been run yet), the corresponding field is null / an empty list and the
+    frontend renders an explicit "not available" state.
+    """
+    repo = await _get_owned_repo(id, current_user, db)
+
+    analysis = await _latest_completed_analysis(db, repo.id)
+
+    # ── No completed scan yet → honest empty state ────────────────
+    if not analysis:
+        return {
+            "repository": {
+                "id": str(repo.id),
+                "name": repo.name,
+                "description": repo.description,
+                "default_branch": repo.default_branch,
+            },
+            "scan": None,
+            "message": "No completed repository scan available yet. Run a scan to generate the overview.",
+        }
+
+    # ── Counts from real persisted rows for THIS scan ─────────────
+    sec_res = await db.execute(
+        select(SecurityFinding).where(SecurityFinding.analysis_id == analysis.id)
+    )
+    sec_rows = list(sec_res.scalars().all())
+
+    smell_res = await db.execute(
+        select(CodeSmell).where(CodeSmell.analysis_id == analysis.id)
+    )
+    smell_rows = list(smell_res.scalars().all())
+
+    dep_res = await db.execute(
+        select(DependencyFinding).where(DependencyFinding.analysis_id == analysis.id)
+    )
+    dep_rows = list(dep_res.scalars().all())
+
+    dup_res = await db.execute(
+        select(DuplicateCodeFinding).where(DuplicateCodeFinding.analysis_id == analysis.id)
+    )
+    dup_rows = list(dup_res.scalars().all())
+
+    debt_res = await db.execute(
+        select(TechnicalDebtFinding).where(TechnicalDebtFinding.analysis_id == analysis.id)
+    )
+    debt_rows = list(debt_res.scalars().all())
+
+    cx_res = await db.execute(
+        select(ComplexityFinding).where(ComplexityFinding.analysis_id == analysis.id)
+    )
+    cx_rows = list(cx_res.scalars().all())
+    high_complexity_count = sum(1 for c in cx_rows if (c.severity or "") == "High")
+
+    health_res = await db.execute(
+        select(HealthScore).where(HealthScore.analysis_id == analysis.id)
+    )
+    health_obj = health_res.scalars().first()
+
+    snapshot_res = await db.execute(
+        select(RepositoryHealthSnapshot)
+        .where(RepositoryHealthSnapshot.analysis_id == analysis.id)
+        .limit(1)
+    )
+    snapshot = snapshot_res.scalars().first()
+
+    # ── Scan freshness / commit info (real values only) ───────────
+    # commit_sha is recorded by the scan pipeline when it could be resolved
+    # from GitHub; when absent we explicitly report None (no invention).
+    commit_sha = snapshot.commit_sha if snapshot else None
+    branch = snapshot.branch if snapshot else (repo.default_branch or None)
+
+    # ── Grounded AI summary ────────────────────────────────────────
+    # Prefer the scan's persisted qualitative report (produced from the
+    # actual repository content during the scan). It is markdown; only
+    # reuse it when it is a substantive report (PR scans store a short
+    # pointer sentence instead).
+    insights_text = (analysis.insights or "").strip()
+    is_full_report = len(insights_text) > 400  # PR scans store one short line
+    ai_summary = insights_text if is_full_report else None
+    ai_summary_source = "scan_report" if is_full_report else None
+
+    if not ai_summary:
+        # Deterministic fallback grounded purely in persisted counts —
+        # clearly labelled so it is never mistaken for AI output.
+        high_sec = sum(1 for f in sec_rows if (f.severity or "") in ("Critical", "High"))
+        vulnerable_deps = sum(1 for d in dep_rows if d.status == "known_vulnerable")
+        parts: list[str] = []
+        parts.append(
+            f"The latest scan analyzed {analysis.files_analyzed_count or 0} file(s) "
+            f"and recorded {len(sec_rows)} security finding(s), "
+            f"{len(smell_rows)} code smell(s), {len(dep_rows)} tracked dependenc(ies), "
+            f"{len(dup_rows)} duplicate code block(s), {len(debt_rows)} technical debt item(s), "
+            f"and {high_complexity_count} high-complexity function(s)."
+        )
+        if vulnerable_deps:
+            parts.append(
+                f"{vulnerable_deps} dependenc(y/ies) match known vulnerability advisories."
+            )
+        if high_sec:
+            parts.append(
+                f"{high_sec} security finding(s) are rated Critical or High and should be reviewed first."
+            )
+        if not sec_rows and not smell_rows and not dup_rows:
+            parts.append("The deterministic scanners reported no issues for this scan.")
+        ai_summary = (
+            "**Deterministic summary** (generated from persisted scan data — no AI "
+            "interpretation): " + " ".join(parts)
+        )
+        ai_summary_source = "deterministic"
+
+    return {
+        "repository": {
+            "id": str(repo.id),
+            "name": repo.name,
+            "description": repo.description,
+            "default_branch": repo.default_branch,
+        },
+        "scan": {
+            "analysis_id": str(analysis.id),
+            "status": analysis.status,
+            "timestamp": analysis.timestamp.isoformat() if analysis.timestamp else None,
+            "branch": branch,
+            "commit_sha": commit_sha,
+            "files_analyzed": analysis.files_analyzed_count or 0,
+            "health_score": health_obj.health_score if health_obj else None,
+            "risk_score": analysis.risk_score,
+            "model_name": analysis.model_name,
+            "scan_duration_seconds": analysis.scan_duration_seconds,
+        },
+        "counts": {
+            "security_issues": len(sec_rows),
+            "critical_security": sum(1 for f in sec_rows if (f.severity or "") == "Critical"),
+            "high_security": sum(1 for f in sec_rows if (f.severity or "") == "High"),
+            "code_smells": len(smell_rows),
+            "dependencies": len(dep_rows),
+            "vulnerable_dependencies": sum(1 for d in dep_rows if d.status == "known_vulnerable"),
+            "duplicate_blocks": len(dup_rows),
+            "technical_debt": len(debt_rows),
+            "complexity_issues": len(cx_rows),
+            "high_complexity": high_complexity_count,
+        },
+        "ai_summary": ai_summary,
+        "ai_summary_source": ai_summary_source,
+        "message": None,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════

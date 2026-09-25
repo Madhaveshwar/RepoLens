@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi import Request, Response
+import os
 import time
 import json
 from sqlalchemy import inspect
@@ -122,6 +123,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # Tests set TESTING=1 before importing the app; the full suite makes
+        # hundreds of requests from one client IP and would otherwise trip
+        # this limit spuriously. Production behavior is unchanged.
+        if os.getenv("TESTING") == "1":
             return await call_next(request)
             
         if "websocket" in request.scope.get("type", "") or request.url.path in ["/docs", "/openapi.json", "/api/v1/health", "/"]:

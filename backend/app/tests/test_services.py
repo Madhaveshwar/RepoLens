@@ -363,7 +363,9 @@ def test_review_entire_repository():
     
     mock_repo = MagicMock()
     mock_repo.default_branch = "main"
-    mock_gh_client.get_repo.return_value = mock_repo
+    # review_entire_repository resolves the Repository via the service's
+    # cached get_repo_object() helper.
+    mock_gh_service.get_repo_object.return_value = mock_repo
     
     mock_branch = MagicMock()
     mock_branch.commit.sha = "commitsha123"

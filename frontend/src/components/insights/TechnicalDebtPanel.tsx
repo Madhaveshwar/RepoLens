@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import axios from "../../lib/api";
 import { Loader2, CreditCard, Layers, Wrench, Info } from "lucide-react";
+import { Pagination } from "../Pagination";
 
 interface DebtItem {
   id: string;
@@ -65,6 +66,14 @@ export const TechnicalDebtPanel: React.FC<{ repoId: string }> = ({ repoId }) => 
         .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9)),
     [items, category, severity]
   );
+
+  // Pagination — resets when filters change.
+  const TD_PAGE_SIZE = 10;
+  const [tdPage, setTdPage] = useState(1);
+  React.useEffect(() => { setTdPage(1); }, [category, severity]);
+  const tdTotalPages = Math.max(1, Math.ceil(filtered.length / TD_PAGE_SIZE));
+  const tdSafePage = Math.min(tdPage, tdTotalPages);
+  const pageItems = filtered.slice((tdSafePage - 1) * TD_PAGE_SIZE, tdSafePage * TD_PAGE_SIZE);
 
   const breakdown = data?.summary?.categories || {};
   const maxCount = Math.max(1, ...Object.values(breakdown));
@@ -196,7 +205,7 @@ export const TechnicalDebtPanel: React.FC<{ repoId: string }> = ({ repoId }) => 
 
           {/* Items */}
           <div className="space-y-2">
-            {filtered.map((i) => (
+            {pageItems.map((i) => (
               <div key={i.id} className="glass p-4 rounded-xl border-l-2 border-accent-orange">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${SEVERITY_STYLES[i.severity] || "glass text-zinc-500"}`}>
@@ -225,6 +234,14 @@ export const TechnicalDebtPanel: React.FC<{ repoId: string }> = ({ repoId }) => 
               </div>
             ))}
           </div>
+
+          <Pagination
+            page={tdPage}
+            pageSize={TD_PAGE_SIZE}
+            totalItems={filtered.length}
+            onPageChange={setTdPage}
+            itemLabel="debt items"
+          />
 
           {data.summary && (
             <p className="text-[9px] text-zinc-400 flex items-start gap-1.5 border-t border-border/40 pt-3">

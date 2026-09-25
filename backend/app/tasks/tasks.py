@@ -324,6 +324,10 @@ def _run_analysis_impl(self, analysis_id: str):
                 client=llm_client,
                 progress_callback=progress_cb
             )
+            # The exact commit analyzed is resolved inside review_entire_repository
+            # and returned as `head_sha`; the insights stage re-uses it so the
+            # health snapshot records the true snapshot SHA (no second GitHub
+            # call that could race with a new push).
 
         # 4. Save results to Database
         update_progress(analysis_id, 70, "Persisting code review results...", status="generating_tests", db=db)
@@ -362,8 +366,16 @@ def _run_analysis_impl(self, analysis_id: str):
 
         security_count = 0
         smell_count = 0
+        # DETERMINISTIC PERSISTENCE ORDER: sort findings by (file, line, issue)
+        # so database row order is stable for the same commit — display order,
+        # comparison results and report content do not depend on dict
+        # iteration order of the LLM/static scanner output.
+        persisted_findings = sorted(
+            results.get("findings", []),
+            key=lambda f: (str(f.get("file", "")), int(f.get("line", 0) or 0), str(f.get("issue", "")))
+        )
         # Save security findings
-        for f in results.get("findings", []):
+        for f in persisted_findings:
             if f.get("category") == "Security":
                 security_count += 1
                 db.add(SecurityFinding(
@@ -476,13 +488,11 @@ def _run_analysis_impl(self, analysis_id: str):
         if not analysis.pull_request_id:
             try:
                 update_progress(analysis_id, 85, "Computing repository insights...", status="generating_insights", db=db)
-                head_sha = None
-                try:
-                    gh_repo_insights = github_service.get_client_for_repo(repo.name).get_repo(repo.name)
-                    head_sha = gh_repo_insights.get_branch(repo.default_branch).commit.sha
-                except Exception as sha_err:
-                    logger.warning(f"Could not resolve head SHA for insights: {sha_err}")
-                insights_status = run_all_insights(db, analysis_id, repo, github_service, commit_sha=head_sha)
+                # Reuse the commit SHA the scan actually analyzed (pinned at
+                # scan start) — re-resolving here could race with a new push
+                # and record a snapshot SHA that was never scanned.
+                scan_head_sha = results.get("head_sha")
+                insights_status = run_all_insights(db, analysis_id, repo, github_service, commit_sha=scan_head_sha)
                 logger.info(f"Repository insights completed: {insights_status}")
             except Exception as insights_exc:
                 logger.error(f"Repository insights failed (non-fatal): {insights_exc}", exc_info=True)

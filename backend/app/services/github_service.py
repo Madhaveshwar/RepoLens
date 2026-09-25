@@ -57,13 +57,22 @@ class GitHubService:
             self.client = Github(auth=Auth.Token(self.token))
         else:
             self.client = Github()
+        # PERF: per-repo client and Repository object caches. Previously every
+        # get_file_content() call constructed a brand-new Github client AND
+        # re-fetched the Repository object — one avoidable API round-trip per
+        # file (150+ extra requests on a large scan).
+        self._client_cache: dict[str, Github] = {}
+        self._repo_obj_cache: dict[str, any] = {}
 
     def get_client_for_repo(self, repo_name: str) -> Github:
-        """Get an authenticated Github client for a specific repository."""
+        """Get an authenticated Github client for a specific repository (cached)."""
+        if repo_name in self._client_cache:
+            return self._client_cache[repo_name]
+        client: Github | None = None
         if self.token:
             from github import Auth
-            return Github(auth=Auth.Token(self.token))
-        if self.integration:
+            client = Github(auth=Auth.Token(self.token))
+        elif self.integration:
             try:
                 parts = repo_name.split("/")
                 if len(parts) >= 2:
@@ -71,17 +80,25 @@ class GitHubService:
                     repo = parts[-1]
                     installation = self.integration.get_repo_installation(owner, repo)
                     token = self.integration.get_access_token(installation.id).token
-                    return Github(token)
+                    client = Github(token)
             except Exception as e:
                 logger.warning(f"Failed to fetch installation client for {repo_name} from GitHub App, falling back: {e}")
-        return self.client
+        if client is None:
+            client = self.client
+        self._client_cache[repo_name] = client
+        return client
+
+    def get_repo_object(self, repo_name: str):
+        """Return a cached PyGithub Repository object (one API call per service instance)."""
+        if repo_name not in self._repo_obj_cache:
+            self._repo_obj_cache[repo_name] = self.get_client_for_repo(repo_name).get_repo(repo_name)
+        return self._repo_obj_cache[repo_name]
 
     def get_repo_details(self, repo_name: str) -> dict[str, object]:
         from github import GithubException
         logger.info(f"Fetching repository details for: {repo_name}")
         try:
-            client = self.get_client_for_repo(repo_name)
-            repo = client.get_repo(repo_name)
+            repo = self.get_repo_object(repo_name)
             is_archived = getattr(repo, "archived", False)
             is_empty = False
             default_branch = repo.default_branch
@@ -127,8 +144,7 @@ class GitHubService:
     def get_open_pull_requests(self, repo_name: str) -> list[dict[str, object]]:
         logger.info(f"Fetching open pull requests for repo: {repo_name}")
         try:
-            client = self.get_client_for_repo(repo_name)
-            repo = client.get_repo(repo_name)
+            repo = self.get_repo_object(repo_name)
             pulls = repo.get_pulls(state="open", sort="created", direction="desc")
             pr_list = []
             for pr in pulls:
@@ -168,8 +184,7 @@ class GitHubService:
     def get_pr_details(self, repo_name: str, pr_number: int) -> dict[str, object]:
         logger.info(f"Fetching details for PR #{pr_number} on repo: {repo_name}")
         try:
-            client = self.get_client_for_repo(repo_name)
-            repo = client.get_repo(repo_name)
+            repo = self.get_repo_object(repo_name)
             pr = repo.get_pull(pr_number)
             logger.info(f"Retrieved details for PR #{pr_number}: title='{pr.title}', status={pr.state}")
             return {
@@ -191,8 +206,7 @@ class GitHubService:
     def get_pr_files(self, repo_name: str, pr_number: int) -> list[dict[str, object]]:
         logger.info(f"Fetching changed files list for PR #{pr_number} on repo: {repo_name}")
         try:
-            client = self.get_client_for_repo(repo_name)
-            repo = client.get_repo(repo_name)
+            repo = self.get_repo_object(repo_name)
             pr = repo.get_pull(pr_number)
             files = []
             for f in pr.get_files():
@@ -214,8 +228,9 @@ class GitHubService:
     def get_file_content(self, repo_name: str, path: str, ref: str) -> str:
         logger.info(f"Fetching file content for {path} (ref: {ref}) in repo: {repo_name}")
         try:
-            client = self.get_client_for_repo(repo_name)
-            repo = client.get_repo(repo_name)
+            # PERF: reuse the cached Repository object instead of re-fetching it
+            # for every single file request.
+            repo = self.get_repo_object(repo_name)
             content_file = repo.get_contents(path, ref=ref)
             if isinstance(content_file, list):
                 logger.warning(f"Path {path} returned a directory listing, not a file.")
@@ -276,8 +291,7 @@ class GitHubService:
     def post_comment(self, repo_name: str, pr_number: int, body: str) -> bool:
         logger.info(f"Posting PR review main comment to PR #{pr_number} on {repo_name}")
         try:
-            client = self.get_client_for_repo(repo_name)
-            repo = client.get_repo(repo_name)
+            repo = self.get_repo_object(repo_name)
             pr = repo.get_pull(pr_number)
             pr.create_issue_comment(body)
             logger.info("PR comment posted successfully.")
@@ -290,10 +304,8 @@ class GitHubService:
         self, repo_name: str, pr_number: int, inline_comments: list[dict[str, object]]
     ) -> tuple[int, int]:
         logger.info(f"Posting {len(inline_comments)} inline comments to PR #{pr_number} on {repo_name}")
-        # Resolve client to verify auth credentials
-        client = self.get_client_for_repo(repo_name)
         try:
-            repo = client.get_repo(repo_name)
+            repo = self.get_repo_object(repo_name)
             pr = repo.get_pull(pr_number)
             commits = list(pr.get_commits())
             if not commits:
@@ -333,8 +345,7 @@ class GitHubService:
         """Create a new branch on the repository from a source branch."""
         logger.info(f"Creating branch '{branch_name}' from '{source_branch}' on {repo_name}")
         try:
-            client = self.get_client_for_repo(repo_name)
-            repo = client.get_repo(repo_name)
+            repo = self.get_repo_object(repo_name)
             source_ref = repo.get_git_ref(f"heads/{source_branch}")
             repo.create_git_ref(f"refs/heads/{branch_name}", source_ref.object.sha)
             logger.info(f"Branch '{branch_name}' created successfully on {repo_name}")
@@ -347,8 +358,7 @@ class GitHubService:
         """Create a pull request on the repository."""
         logger.info(f"Creating PR '{title}' ({head} -> {base}) on {repo_name}")
         try:
-            client = self.get_client_for_repo(repo_name)
-            repo = client.get_repo(repo_name)
+            repo = self.get_repo_object(repo_name)
             pr = repo.create_pull(title=title, body=body, head=head, base=base)
             logger.info(f"PR #{pr.number} created successfully on {repo_name}")
             return {

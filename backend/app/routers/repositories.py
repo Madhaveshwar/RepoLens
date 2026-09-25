@@ -209,6 +209,94 @@ async def get_repository(
     repo.permissions = perms
     return repo
 
+@router.get("/{id}/scan-identity")
+async def get_scan_identity(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db)
+):
+    """Scan identity / snapshot check.
+
+    Compares the commit SHA of the user's latest completed scan with the
+    CURRENT head of the repository's default branch on GitHub, so the UI can
+    honestly say whether this exact repository state has already been
+    analyzed — instead of silently producing a different-looking rescan.
+
+    Returns real values only: nulls when data is unavailable.
+    """
+    result = await db.execute(
+        select(Repository).where(
+            (Repository.id == id) & (Repository.user_id == current_user.id)
+        )
+    )
+    repo = result.scalars().first()
+    if not repo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found.")
+
+    # Latest completed scan + its snapshot (snapshot rows carry the pinned SHA)
+    scan_res = await db.execute(
+        select(Analysis)
+        .where(
+            (Analysis.repository_id == repo.id)
+            & (Analysis.status == "completed")
+            & ((Analysis.is_deleted == False) | (Analysis.is_deleted.is_(None)))
+            & (Analysis.pull_request_id.is_(None))  # full repo scans only
+        )
+        .order_by(Analysis.timestamp.desc())
+        .limit(1)
+    )
+    latest_scan = scan_res.scalars().first()
+
+    from app.models.models import RepositoryHealthSnapshot
+    last_scan_commit = None
+    last_scan_at = None
+    last_scan_id = None
+    if latest_scan:
+        last_scan_at = latest_scan.timestamp.isoformat() if latest_scan.timestamp else None
+        last_scan_id = str(latest_scan.id)
+        snap_res = await db.execute(
+            select(RepositoryHealthSnapshot)
+            .where(RepositoryHealthSnapshot.analysis_id == latest_scan.id)
+            .limit(1)
+        )
+        snapshot = snap_res.scalars().first()
+        last_scan_commit = snapshot.commit_sha if snapshot else None
+
+    # Current head on GitHub (may be unavailable — offline/PAT issues)
+    current_head = None
+    branch = repo.default_branch
+    pat = encryptor.decrypt(current_user.github_pat_encrypted) if current_user.github_pat_encrypted else settings.GITHUB_TOKEN
+    if pat:
+        try:
+            gh_repo = GitHubService(token=pat).client.get_repo(repo.name)
+            branch = gh_repo.default_branch or branch
+            current_head = gh_repo.get_branch(branch).commit.sha
+        except Exception as e:
+            logger.error(f"scan-identity: could not resolve current head for {repo.name}: {e}")
+
+    same_state = bool(
+        last_scan_commit and current_head and last_scan_commit == current_head
+    )
+
+    return {
+        "repository_id": str(repo.id),
+        "repository": repo.name,
+        "branch": branch,
+        "last_scan": {
+            "analysis_id": last_scan_id,
+            "commit_sha": last_scan_commit,
+            "timestamp": last_scan_at,
+        } if latest_scan else None,
+        "current_head_commit": current_head,
+        "already_analyzed": same_state,
+        "message": (
+            "This exact commit has already been analyzed." if same_state
+            else "New repository state — a fresh scan is required."
+            if current_head else None
+        ),
+    }
+
+
 @router.get("/{id}/prs", response_model=List[PullRequestOut])
 async def list_repository_prs(
     id: uuid.UUID,

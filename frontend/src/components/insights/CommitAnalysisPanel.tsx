@@ -6,6 +6,7 @@ import {
   Loader2, GitCommitHorizontal, Bot, Search, FileCode2, ArrowRight,
   RefreshCw, ShieldCheck, ShieldAlert, ChevronDown, ChevronUp,
 } from "lucide-react";
+import { formatDateTime } from "../../lib/datetime";
 
 interface CommitListItem {
   sha: string;
@@ -213,7 +214,7 @@ export const CommitAnalysisPanel: React.FC<{ repoId: string }> = ({ repoId }) =>
                   </div>
                   <p className="text-[10px] text-zinc-500 mt-0.5">
                     @{c.author}
-                    {c.date ? ` · ${new Date(c.date).toLocaleString()}` : ""}
+                    {c.date ? ` · ${formatDateTime(c.date)}` : ""}
                   </p>
                 </button>
               );
@@ -284,7 +285,7 @@ export const CommitAnalysisPanel: React.FC<{ repoId: string }> = ({ repoId }) =>
                         {analysis.sha.slice(0, 10)}
                         {analysis.parent_sha ? ` (parent ${analysis.parent_sha.slice(0, 7)})` : " · no parent (root commit)"}
                         {" · "}@{analysis.author}
-                        {analysis.committed_at ? ` · ${new Date(analysis.committed_at).toLocaleString()}` : ""}
+                        {analysis.committed_at ? ` · ${formatDateTime(analysis.committed_at)}` : ""}
                       </p>
                     </div>
                     <div className="flex gap-2">

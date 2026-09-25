@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Pagination } from "../Pagination";
 import { useQuery } from "@tanstack/react-query";
 import axios from "../../lib/api";
 import { Loader2, Copy, FileCode2, ArrowRight, ChevronDown, ChevronUp } from "lucide-react";
@@ -49,6 +50,14 @@ export const DuplicatesPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
 
   const findings = data?.findings || [];
   const totalDuplicatedLines = findings.reduce((acc, f) => acc + f.duplicated_lines, 0);
+
+  // Pagination — resets when the threshold filter changes the list.
+  const DUP_PAGE_SIZE = 10;
+  const [dupPage, setDupPage] = useState(1);
+  React.useEffect(() => { setDupPage(1); }, [minSimilarity]);
+  const dupTotalPages = Math.max(1, Math.ceil(findings.length / DUP_PAGE_SIZE));
+  const dupSafePage = Math.min(dupPage, dupTotalPages);
+  const pageItems = findings.slice((dupSafePage - 1) * DUP_PAGE_SIZE, dupSafePage * DUP_PAGE_SIZE);
 
   if (isLoading) {
     return (
@@ -124,8 +133,9 @@ export const DuplicatesPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
           </p>
         </div>
       ) : (
-        <div className="space-y-2">
-          {findings.map((f) => {
+        <>
+          <div className="space-y-2">
+          {pageItems.map((f) => {
             const isOpen = expanded === f.id;
             return (
               <button
@@ -175,7 +185,15 @@ export const DuplicatesPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
               </button>
             );
           })}
-        </div>
+          </div>
+          <Pagination
+            page={dupPage}
+            pageSize={DUP_PAGE_SIZE}
+            totalItems={findings.length}
+            onPageChange={setDupPage}
+            itemLabel="duplicate pairs"
+          />
+        </>
       )}
       {isFetching && <p className="text-[10px] text-zinc-400 text-center">Refreshing…</p>}
     </div>

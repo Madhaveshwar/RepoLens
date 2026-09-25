@@ -5,6 +5,7 @@ import { Markdown } from "../Markdown";
 import {
   Loader2, GitPullRequest, Bot, Cpu, ShieldCheck, ShieldAlert, Sparkles, RefreshCw, FileCode2,
 } from "lucide-react";
+import { formatDateTime, formatDate } from "../../lib/datetime";
 
 interface PRListItem {
   number: number;
@@ -185,7 +186,7 @@ export const PRReviewPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
                     <span className="text-red-500">−{pr.deletions}</span>
                     {pr.review ? (
                       <span className="text-zinc-500">
-                        · reviewed {pr.review.reviewed_at ? new Date(pr.review.reviewed_at).toLocaleDateString() : ""} · {pr.review.findings_count} findings
+                        · reviewed {pr.review.reviewed_at ? formatDate(pr.review.reviewed_at) : ""} · {pr.review.findings_count} findings
                       </span>
                     ) : (
                       <span className="text-zinc-400">· not reviewed yet</span>
@@ -355,7 +356,7 @@ export const PRReviewPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
 
               {review.reviewed_at && (
                 <p className="text-[9px] text-zinc-400">
-                  Reviewed {new Date(review.reviewed_at).toLocaleString()} · analysis stored read-only; nothing was posted to GitHub.
+                  Reviewed {formatDateTime(review.reviewed_at)} · analysis stored read-only; nothing was posted to GitHub.
                 </p>
               )}
             </div>

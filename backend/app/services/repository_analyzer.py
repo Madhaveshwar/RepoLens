@@ -17,13 +17,17 @@ def analyze_repository(
     github_service,
     repo_name: str,
     model_name: str = MODEL_NAME,
-    temperature: float = 0.3,
+    temperature: float = 0.0,
     qualitative_report: str | None = None,
+    ref: str | None = None,
 ) -> dict[str, object]:
     logger.info(f"Triggered health analysis for repository: {repo_name}")
     g = github_service.client
     repo = g.get_repo(repo_name)
     default_branch = repo.default_branch
+    # Deterministic snapshot: analyze the pinned ref (commit SHA) when given,
+    # so the health analysis matches the exact commit the rest of the scan used.
+    analysis_ref = ref or default_branch
     logger.info(f"Repository default branch identified as: {default_branch}")
 
     # 1. Fetch the Git Tree recursively
@@ -31,7 +35,10 @@ def analyze_repository(
     try:
         branch = repo.get_branch(default_branch)
         sha = branch.commit.sha
-        logger.info(f"Latest default branch commit SHA: {sha}. Requesting git tree recursively.")
+        if ref:
+            # Prefer the caller-pinned commit for tree + content consistency.
+            sha = ref
+        logger.info(f"Analyzing ref {analysis_ref} (resolved SHA: {sha}). Requesting git tree recursively.")
         git_tree = repo.get_git_tree(sha=sha, recursive=True)
         tree_items = git_tree.tree
         logger.info(f"Retrieved {len(tree_items)} elements from Git tree.")
@@ -67,7 +74,7 @@ def analyze_repository(
                 readme_exists = True
             
             if os.path.basename(path).lower() == "requirements.txt":
-                requirements_content = github_service.get_file_content(repo_name, path, default_branch)
+                requirements_content = github_service.get_file_content(repo_name, path, analysis_ref)
                 logger.info(f"Requirements.txt located. Read {len(requirements_content)} characters.")
 
             basename = os.path.basename(path).lower()
@@ -119,7 +126,7 @@ def analyze_repository(
     total_samples = len(sample_files)
     
     for path in sample_files:
-        content = github_service.get_file_content(repo_name, path, default_branch)
+        content = github_service.get_file_content(repo_name, path, analysis_ref)
         if '"""' in content or "'''" in content or "/**" in content or "/*" in content:
             doc_hits += 1
 

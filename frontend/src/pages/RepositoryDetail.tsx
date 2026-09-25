@@ -1,13 +1,16 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import axios from "../lib/api";
 import { useRepositoryStore } from "../store/repositoryStore";
 import { useAuthStore } from "../store/authStore";
 import type { PullRequest } from "../store/repositoryStore";
+import { formatDateTime } from "../lib/datetime";
+import { toast } from "../components/Toast";
+import { Pagination, usePagination } from "../components/Pagination";
 import { useAnalysisStore } from "../store/analysisStore";
 import {
   ArrowLeft, GitPullRequest, BookOpen,
-  Play, Loader2, Download, Clock, Check, RefreshCw,
-  Folder, File, ChevronRight, ChevronDown, Save, X, Code, Lightbulb, ExternalLink,
+  Play, Loader2, Download, Clock, Check, RefreshCw, CheckCircle2,
+  Folder, File, ChevronRight, ChevronDown, Save, X, Code,
   AlertTriangle, ShieldCheck, Sparkles, BarChart3
 } from "lucide-react";
 import Editor from "@monaco-editor/react";
@@ -21,6 +24,10 @@ import { ArchitecturePanel } from "../components/insights/ArchitecturePanel";
 import { ComplexityPanel } from "../components/insights/ComplexityPanel";
 import { PRReviewPanel } from "../components/insights/PRReviewPanel";
 import { CommitAnalysisPanel } from "../components/insights/CommitAnalysisPanel";
+import { RepositoryOverviewPanel } from "../components/insights/RepositoryOverviewPanel";
+import { InsightsOverviewPanel } from "../components/insights/InsightsOverviewPanel";
+import { ScanSummaryModal } from "../components/insights/ScanSummaryModal";
+import { FindingCard } from "../components/FindingCard";
 
 interface RepositoryDetailProps {
   onBack: () => void;
@@ -103,28 +110,31 @@ const FileTreeItem: React.FC<{
   );
 };
 
-const DEEP_SECTIONS = [
+const DEEP_INSIGHT_SECTIONS = [
   { id: "health", name: "Health Trend", component: HealthTrendPanel },
   { id: "deps", name: "Dependencies", component: DependenciesPanel },
   { id: "duplicates", name: "Duplicates", component: DuplicatesPanel },
-  { id: "debt", name: "Technical Debt", component: TechnicalDebtPanel },
-  { id: "architecture", name: "Architecture", component: ArchitecturePanel },
   { id: "complexity", name: "Complexity", component: ComplexityPanel },
-  { id: "pr", name: "PR Review", component: PRReviewPanel },
+  { id: "architecture", name: "Architecture", component: ArchitecturePanel },
+  { id: "debt", name: "Technical Debt", component: TechnicalDebtPanel },
+  { id: "pr", name: "Pull Requests", component: PRReviewPanel },
   { id: "commits", name: "Commits", component: CommitAnalysisPanel },
 ] as const;
 
-const DeepInsightsTab: React.FC<{ repoId: string }> = ({ repoId }) => {
-  const [section, setSection] = useState<string>("health");
-  const ActiveSection = DEEP_SECTIONS.find((s) => s.id === section)?.component ?? HealthTrendPanel;
+/** DEEP INSIGHTS — the technical level. Detailed analysis panels organized
+ *  by section; lazy-loaded when the user opens this tab. */
+const DeepInsightsTab: React.FC<{ repoId: string; initialSection?: string }> = ({ repoId, initialSection }) => {
+  const [section, setSection] = useState<string>(initialSection || "health");
+  const ActiveSection = DEEP_INSIGHT_SECTIONS.find((s) => s.id === section)?.component ?? HealthTrendPanel;
 
   return (
     <div className="space-y-5">
       <div className="flex gap-2 flex-wrap glass rounded-2xl p-1.5">
-        {DEEP_SECTIONS.map((s) => (
+        {DEEP_INSIGHT_SECTIONS.map((s) => (
           <button
             key={s.id}
             onClick={() => setSection(s.id)}
+            aria-pressed={section === s.id}
             className={`text-[11px] font-bold px-3.5 py-2 rounded-xl transition-all ${
               section === s.id
                 ? "bg-accent-blue text-white shadow"
@@ -272,6 +282,46 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
     }
   }, [analyses, activeAnalysis]);
 
+  // ── Scan summary: shown once when a scan transitions to completed ──
+  // Tracks the previous progress so the summary appears exactly once,
+  // only for scans the user actually triggered in this session.
+  const [showScanSummary, setShowScanSummary] = useState(false);
+  const [summaryAnalysisId, setSummaryAnalysisId] = useState<string | null>(null);
+  const [deepSection, setDeepSection] = useState<string>("health");
+  const [showAlreadyAnalyzed, setShowAlreadyAnalyzed] = useState(false);
+  const [scanIdentity, setScanIdentity] = useState<any>(null);
+  const prevProgressRef = useRef<number>(0);
+
+  // Pagination for large finding lists (10 per page; filters/sorting live in
+  // the backend-ordered arrays so page changes preserve them automatically).
+  const SECURITY_PAGE_SIZE = 10;
+  const {
+    page: securityPage,
+    setPage: setSecurityPage,
+    pageItems: securityPageItems,
+  } = usePagination(securityFindings || [], SECURITY_PAGE_SIZE);
+  const {
+    page: qualityPage,
+    setPage: setQualityPage,
+    pageItems: qualityPageItems,
+  } = usePagination(codeSmells || [], SECURITY_PAGE_SIZE);
+
+  useEffect(() => {
+    const prev = prevProgressRef.current;
+    prevProgressRef.current = progress;
+
+    // Transition: was in-progress (<100), now completed → show summary
+    if (
+      prev > 0 && prev < 100 &&
+      activeAnalysis?.status === "completed" &&
+      (progress >= 100 || activeAnalysis.progress >= 100)
+    ) {
+      setSummaryAnalysisId(activeAnalysis.id);
+      setShowScanSummary(true);
+      toast.success("Scan completed successfully.");
+    }
+  }, [progress, activeAnalysis?.status, activeAnalysis?.progress, activeAnalysis?.id]);
+
   const [openFilePath, setOpenFilePath] = useState<string | null>(null);
   const [openFileContent, setOpenFileContent] = useState("");
   // [REMOVED] editorOriginalContent, editorUnsaved — read-only explorer
@@ -310,26 +360,28 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
       });
       setOpenFileContent(res.data.content);
     } catch (err: any) {
-      alert(err.response?.data?.detail || "Failed to download file content from GitHub.");
+      toast.error(err.response?.data?.detail || "Failed to download file content from GitHub.");
     }
   };
 
-  // Jump to Line number in Monaco editor
-  const handleJumpToLine = async (filePath: string, line: number) => {
+  // Jump to a line (or line range) in the Monaco editor and highlight it.
+  const handleJumpToLine = async (filePath: string, line: number, endLine?: number | null) => {
     setActiveTab("explorer");
     await handleSelectFile(filePath);
     // Wait for content load
     setTimeout(() => {
       if (monacoEditor) {
-        monacoEditor.revealLineInCenter(line);
-        monacoEditor.setPosition({ lineNumber: line, column: 1 });
+        const start = Math.max(1, line);
+        const end = endLine && endLine >= start ? endLine : start;
+        monacoEditor.revealLinesInCenter(start, end);
+        monacoEditor.setPosition({ lineNumber: start, column: 1 });
         monacoEditor.focus();
         
-        // Highlight line with decorations if monacoInstance is available
+        // Highlight the exact line range with decorations if monacoInstance is available
         if (monacoInstance) {
           const newDecs = monacoEditor.deltaDecorations(decorations, [
             {
-              range: new monacoInstance.Range(line, 1, line, 1),
+              range: new monacoInstance.Range(start, 1, end, 1),
               options: {
                 isWholeLine: true,
                 className: 'bg-red-500/10 border-l-2 border-red-500',
@@ -418,7 +470,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
       await disconnectRepository(activeRepo.id);
       onBack();
     } catch (err: any) {
-      alert(err.message || "Failed to disconnect repository");
+      toast.error(err.message || "Failed to disconnect repository");
     } finally {
       setActionLoading(false);
       setShowDisconnectModal(false);
@@ -432,7 +484,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
       await deleteRepository(activeRepo.id);
       onBack();
     } catch (err: any) {
-      alert(err.message || "Failed to delete repository");
+      toast.error(err.message || "Failed to delete repository");
     } finally {
       setActionLoading(false);
       setShowDeleteRepoModal(false);
@@ -451,12 +503,31 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
   const handleRunAnalysis = async () => {
     if (!activeRepo) return;
+    // Scan identity check: if this exact commit was already analyzed, ask the
+    // user instead of silently producing a possibly-different-looking rescan.
+    try {
+      const res = await axios.get(`/repositories/${activeRepo.id}/scan-identity`);
+      if (res.data?.already_analyzed) {
+        setScanIdentity(res.data);
+        setShowAlreadyAnalyzed(true);
+        return;
+      }
+    } catch {
+      // Identity check is best-effort; proceed with the scan if unavailable.
+    }
+    await startScan();
+  };
+
+  const startScan = async () => {
+    if (!activeRepo) return;
     try {
       resetProgress();
       await triggerAnalysis(activeRepo.id);
-    } catch (err) {
+      toast.info("Repository scan started. You can watch the progress below.");
+    } catch (err: any) {
       // Error state is surfaced via the analysisError banner below —
       // the scanning UI must never remain stuck.
+      toast.error(err?.response?.data?.detail || err?.message || "Scan failed. Please try again.");
     }
   };
 
@@ -491,14 +562,15 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
           link.click();
           link.remove();
           window.URL.revokeObjectURL(url);
+          toast.success("Report generated successfully.");
         }).catch(() => {
-          alert(`Failed to download report content for ${type}.`);
+          toast.error(`Failed to download report content for ${type}.`);
         });
       } else {
-        alert(`${type} report file generation in progress or failed.`);
+        toast.error(`${type} report file generation in progress or failed.`);
       }
     }).catch(() => {
-      alert("Failed to fetch reports index.");
+      toast.error("Failed to fetch reports index.");
     });
   };
 
@@ -623,11 +695,11 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
       {/* Live progress stream */}
       {showProgress && (
-        <div className="glass-card p-6 mb-6 space-y-4">
+        <div className="glass-card p-6 mb-6 space-y-4" role="status" aria-live="polite" aria-label="Repository scan progress">
           <div className="flex justify-between items-center text-sm font-bold text-zinc-900 dark:text-white">
             <span className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-accent-orange animate-ping" />
-              Scanning Repository
+              <span className="w-2 h-2 rounded-full bg-accent-orange animate-ping" aria-hidden="true" />
+              Analyzing Repository...
             </span>
             <span className="text-accent-orange">{progress}%</span>
           </div>
@@ -638,6 +710,11 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
             </div>
           </div>
           
+          {/* Actual backend status message — real scan state, never fabricated */}
+          {progressDetailed?.message && (
+            <p className="text-xs text-zinc-600 font-medium dark:text-zinc-300">{progressDetailed.message}</p>
+          )}
+
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-3 border-y border-border/40 text-xs">
             <div>
               <span className="metric-label block text-[9px] tracking-wider">Status</span>
@@ -645,7 +722,12 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
             </div>
             <div>
               <span className="metric-label block text-[9px] tracking-wider">Files Scanned</span>
-              <span className="text-zinc-600 font-semibold dark:text-zinc-300">{progressDetailed?.files_analyzed || 0} / {progressDetailed?.total_files || 0}</span>
+              <span className="text-zinc-600 font-semibold dark:text-zinc-300">
+                {progressDetailed?.files_analyzed || 0}
+                {progressDetailed?.total_files && progressDetailed.total_files > 0
+                  ? ` / ${progressDetailed.total_files}`
+                  : ""}
+              </span>
             </div>
             <div>
               <span className="metric-label block text-[9px] tracking-wider">Elapsed</span>
@@ -723,7 +805,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
         {[
           { id: "overview", name: "Overview" },
           { id: "explorer", name: "Code Explorer" },
-          { id: "prs", name: `PRs (${prs.length})` },
+          { id: "prs", name: `Pull Requests (${prs.length})` },
           { id: "security", name: "Security" },
           { id: "quality", name: "Code Quality" },
           { id: "tests", name: "Tests" },
@@ -746,9 +828,13 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
       {/* Tab Contents */}
       <div className="space-y-6">
-        {/* Tab 1: Overview */}
+        {/* Tab 1: Overview — evidence-based executive summary first */}
         {activeTab === "overview" && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="space-y-6">
+            {/* Repository Overview: real counts + grounded AI summary + scan freshness */}
+            <RepositoryOverviewPanel repoId={activeRepo.id} />
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Left info */}
             <div className="lg:col-span-2 space-y-6">
               <div className="glass-card p-6">
@@ -854,7 +940,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                             Scan on branch {activeRepo.default_branch}
                           </p>
                           <span className="text-[10px] text-zinc-500 block mt-1 dark:text-zinc-400">
-                            {new Date(an.timestamp).toLocaleString()}
+                            {formatDateTime(an.timestamp)}
                           </span>
                         </div>
                         <div className="flex items-center gap-3 text-xs font-semibold">
@@ -895,6 +981,15 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                 </div>
 
                 {scanCompleted ? (
+                  <>
+                  {/* Unified full-report entry point — uses the existing report system */}
+                  <button
+                    onClick={() => handleDownload("PDF")}
+                    className="btn-primary w-full flex items-center justify-center gap-2 mb-3"
+                  >
+                    <Download className="w-4 h-4" />
+                    Download Full Report
+                  </button>
                   <div className="grid grid-cols-2 gap-3">
                     <button onClick={() => handleDownload("PDF")} className="flex items-center justify-center gap-2 border border-border hover:bg-zinc-100 py-2.5 rounded-lg text-xs text-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-800">
                       <Download className="w-3.5 h-3.5" /> PDF
@@ -909,12 +1004,18 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                       <Download className="w-3.5 h-3.5" /> CSV
                     </button>
                   </div>
+                  <p className="text-[10px] text-zinc-500 mt-3 dark:text-zinc-400">
+                    The full PDF report includes findings, health analysis, dependencies,
+                    duplicates, technical debt, architecture and complexity sections where data is available.
+                  </p>
+                  </>
                 ) : (
                   <div className="text-center text-zinc-700 font-semibold text-xs p-4 bg-background/50 border border-dashed border-border rounded-lg dark:text-zinc-300 dark:bg-zinc-900/40">
                     No completed analysis selected. Run a repository scan first.
                   </div>
                 )}
               </div>
+            </div>
             </div>
           </div>
         )}
@@ -1061,58 +1162,35 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
               <h3 className="font-bold text-zinc-900 dark:text-white">Security Findings ({securityFindings.length})</h3>
             </div>
             {securityFindings.length > 0 ? (
-              <div className="space-y-4">
-                {securityFindings.map((finding) => (
-                  <div
-                    key={finding.id}
-                    className="glass p-5 rounded-2xl flex flex-col justify-between"
-                  >
-                    <div className="flex justify-between items-start mb-3">
-                      <div className="flex items-start gap-3">
-                        <div>
-                          <span className="text-[10px] text-accent-red font-bold uppercase px-2 py-0.5 bg-red-500/10 rounded-full border border-red-500/20">
-                            {finding.severity}
-                          </span>
-                          <h4 className="font-bold text-sm text-zinc-900 mt-2 dark:text-zinc-100">{finding.issue}</h4>
-                          <p className="text-xs text-zinc-600 mt-1 dark:text-zinc-400">File: `{finding.file}` | Line {finding.line}</p>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <div className="text-xs text-zinc-700 mt-2 space-y-2 dark:text-zinc-300">
-                      <p><span className="font-bold text-zinc-900 block mb-0.5 dark:text-zinc-100">Why it matters:</span> {finding.why_it_matters}</p>
-                      <p><span className="font-bold text-zinc-900 block mb-0.5 dark:text-zinc-100">Remediation Steps:</span> {finding.suggestion}</p>
-                    </div>
-
-                    {finding.after_code && (
-                      <div className="mt-4">
-                        <span className="metric-label text-[10px] block mb-2">Suggested Remediation</span>
-                        <pre className="p-4 bg-zinc-100 border border-border rounded-lg text-zinc-800 font-mono text-xs overflow-x-auto whitespace-pre-wrap dark:bg-zinc-900 dark:text-zinc-200">
-                          {finding.after_code}
-                        </pre>
-                      </div>
-                    )}
-
-                    <div className="mt-4 pt-4 border-t border-border/40 flex justify-between items-center font-sans">
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => handleJumpToLine(finding.file, finding.line)}
-                          className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white"
-                        >
-                          <ExternalLink className="w-3 h-3" /> Open in Editor
-                        </button>
-                        <button
-                          onClick={() => handleExplainFinding(finding.id, "security")}
-                          className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white"
-                        >
-                          <Lightbulb className="w-3 h-3" />
-                          Explain Issue
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <>
+                <div className="space-y-4">
+                  {securityPageItems.map((finding) => (
+                    <FindingCard
+                      key={finding.id}
+                      severity={finding.severity}
+                      issue={finding.issue}
+                      file={finding.file}
+                      line={finding.line}
+                      startLine={finding.start_line}
+                      endLine={finding.end_line}
+                      evidence={finding.before_code || finding.code_snippet || null}
+                      suggestedFix={finding.after_code || null}
+                      whyItMatters={finding.why_it_matters}
+                      suggestion={finding.suggestion}
+                      source={finding.source}
+                      onJumpToLine={() => handleJumpToLine(finding.file, finding.line, finding.end_line)}
+                      onExplain={() => handleExplainFinding(finding.id, "security")}
+                    />
+                  ))}
+                </div>
+                <Pagination
+                  page={securityPage}
+                  pageSize={SECURITY_PAGE_SIZE}
+                  totalItems={securityFindings.length}
+                  onPageChange={setSecurityPage}
+                  itemLabel="security findings"
+                />
+              </>
             ) : scanCompleted ? (
               <div className="text-center py-8 bg-background/50 border border-dashed border-border rounded-lg dark:bg-zinc-900/40">
                 <ShieldCheck className="w-10 h-10 text-accent-green mx-auto mb-3" />
@@ -1137,65 +1215,34 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
               <h3 className="font-bold text-zinc-900 dark:text-white">Code Smells &amp; Maintainability ({codeSmells.length})</h3>
             </div>
             {codeSmells.length > 0 ? (
-              <div className="space-y-4">
-                {codeSmells.map((smell) => (
-                  <div
-                    key={smell.id}
-                    className="glass p-5 rounded-2xl flex flex-col justify-between"
-                  >
-                    <div className="flex justify-between items-start mb-3">
-                      <div className="flex items-start gap-3">
-                        <div>
-                          <span className="text-[10px] text-accent-orange font-bold uppercase px-2 py-0.5 bg-orange-500/10 rounded-full border border-orange-500/20">
-                            {smell.severity}
-                          </span>
-                          <h4 className="font-bold text-sm text-zinc-900 mt-2 dark:text-zinc-100">{smell.issue}</h4>
-                          <p className="text-xs text-zinc-600 mt-1 dark:text-zinc-400">File: `{smell.file}` | Line {smell.line}</p>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <div className="text-xs text-zinc-700 mt-2 space-y-2 dark:text-zinc-300">
-                      <p><span className="font-bold text-zinc-900 block mb-0.5 dark:text-zinc-100">Explanation:</span> {smell.why_it_matters}</p>
-                      <p><span className="font-bold text-zinc-900 block mb-0.5 dark:text-zinc-100">Refactoring suggestion:</span> {smell.suggestion}</p>
-                    </div>
-
-                    {smell.before_code && (
-                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
-                        <div>
-                          <span className="text-[10px] font-bold text-accent-red uppercase tracking-widest block mb-2">Before (Smell):</span>
-                          <pre className="p-3 bg-red-50 border border-red-200 rounded-lg text-zinc-800 font-mono text-xs overflow-x-auto whitespace-pre-wrap dark:bg-red-950/30 dark:border-red-800 dark:text-red-200">
-                            {smell.before_code}
-                          </pre>
-                        </div>
-                        <div>
-                          <span className="text-[10px] font-bold text-accent-green uppercase tracking-widest block mb-2">Suggested Code:</span>
-                          <pre className="p-3 bg-green-50 border border-green-200 rounded-lg text-zinc-800 font-mono text-xs overflow-x-auto whitespace-pre-wrap dark:bg-green-950/30 dark:border-green-800 dark:text-green-200">
-                            {smell.after_code}
-                          </pre>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="mt-4 pt-4 border-t border-border/40 flex justify-between items-center font-sans">
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => handleJumpToLine(smell.file, smell.line)}
-                          className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white"
-                        >
-                          <ExternalLink className="w-3 h-3" /> Open in Editor
-                        </button>
-                        <button
-                          onClick={() => handleExplainFinding(smell.id, "code_smell")}
-                          className="px-3 py-1.5 border border-border hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white"
-                        >
-                          <Lightbulb className="w-3 h-3" /> Explain Issue
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <>
+                <div className="space-y-4">
+                  {qualityPageItems.map((smell) => (
+                    <FindingCard
+                      key={smell.id}
+                      severity={smell.severity}
+                      issue={smell.issue}
+                      file={smell.file}
+                      line={smell.line}
+                      startLine={smell.start_line}
+                      endLine={smell.end_line}
+                      evidence={smell.before_code || smell.code_snippet || null}
+                      suggestedFix={smell.after_code || null}
+                      whyItMatters={smell.why_it_matters}
+                      suggestion={smell.suggestion}
+                      source={smell.source}
+                      onJumpToLine={() => handleJumpToLine(smell.file, smell.line, smell.end_line)}                      onExplain={() => handleExplainFinding(smell.id, "code_smell")}
+                    />
+                  ))}
+                </div>
+                <Pagination
+                  page={qualityPage}
+                  pageSize={SECURITY_PAGE_SIZE}
+                  totalItems={codeSmells.length}
+                  onPageChange={setQualityPage}
+                  itemLabel="code quality findings"
+                />
+              </>
             ) : scanCompleted ? (
               <div className="text-center py-8 bg-background/50 border border-dashed border-border rounded-lg dark:bg-zinc-900/40">
                 <ShieldCheck className="w-10 h-10 text-accent-green mx-auto mb-3" />
@@ -1235,10 +1282,24 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
           </div>
         )}
 
-        {/* Tab 6: Insights — qualitative report + the 6 real insight panels */}
+        {/* Tab 6: INSIGHTS — the simple level: what is happening */}
         {activeTab === "insights" && activeRepo && (
-          <div className="space-y-6">
-            {/* Qualitative Engineering Report (AI, from latest completed scan) */}
+          <InsightsOverviewPanel
+            repoId={activeRepo.id}
+            onOpenDeep={(section) => {
+              setDeepSection(section || "health");
+              setActiveTab("deep");
+            }}
+          />
+        )}
+
+        {/* Tab 7: DEEP INSIGHTS — the technical level: detailed evidence */}
+        {activeTab === "deep" && activeRepo && (
+          <div className="space-y-5">
+            <p className="text-[11px] text-zinc-600 font-medium dark:text-zinc-400">
+              Technical analysis of your latest scan. For a plain-language summary, open the Insights tab.
+            </p>
+            {/* Qualitative Engineering Report (AI narrative of the scan) */}
             <div className="glass-card p-6">
               <h3 className="font-bold text-zinc-900 mb-4 dark:text-white">Qualitative Engineering Report</h3>
               {activeAnalysis?.insights && scanCompleted ? (
@@ -1253,25 +1314,80 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
               )}
             </div>
 
-            {/* Real insight panels (all data from the insights backend) */}
-            <HealthTrendPanel repoId={activeRepo.id} />
-            <DependenciesPanel repoId={activeRepo.id} />
-            <DuplicatesPanel repoId={activeRepo.id} />
-            <TechnicalDebtPanel repoId={activeRepo.id} />
-            <ArchitecturePanel repoId={activeRepo.id} />
-            <ComplexityPanel repoId={activeRepo.id} />
+            <DeepInsightsTab repoId={activeRepo.id} initialSection={deepSection} />
           </div>
-        )}
-
-        {/* Tab 7: Deep Insights (8 deep-dive features) */}
-        {activeTab === "deep" && activeRepo && (
-          <DeepInsightsTab repoId={activeRepo.id} />
         )}
       </div>
 
+      {/* Already-scanned dialog: same repository + commit */}
+      {showAlreadyAnalyzed && scanIdentity && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[70] p-4 animate-fade-in" role="dialog" aria-modal="true" aria-labelledby="already-scanned-title">
+          <div className="glass-card w-full max-w-md rounded-2xl shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-border flex items-center gap-2.5 bg-zinc-50 dark:bg-zinc-900">
+              <CheckCircle2 className="w-5 h-5 text-accent-blue" aria-hidden="true" />
+              <h3 id="already-scanned-title" className="text-md font-bold text-zinc-900 dark:text-white">Already scanned</h3>
+            </div>
+            <div className="p-6 space-y-4 text-xs">
+              <div className="glass p-4 rounded-xl space-y-2">
+                <p className="flex justify-between">
+                  <span className="text-zinc-500 dark:text-zinc-400">Commit</span>
+                  <span className="font-mono font-bold text-zinc-900 dark:text-zinc-100">{String(scanIdentity.last_scan?.commit_sha || "").slice(0, 7) || "Not recorded"}</span>
+                </p>
+                <p className="flex justify-between">
+                  <span className="text-zinc-500 dark:text-zinc-400">Scanned</span>
+                  <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                    {scanIdentity.last_scan?.timestamp ? formatDateTime(scanIdentity.last_scan.timestamp) : "Date not recorded"}
+                  </span>
+                </p>
+                <p className="flex justify-between">
+                  <span className="text-zinc-500 dark:text-zinc-400">Branch</span>
+                  <span className="font-semibold text-zinc-900 dark:text-zinc-100">{scanIdentity.branch || "Not available"}</span>
+                </p>
+              </div>
+              <p className="text-[11px] text-zinc-500 leading-relaxed dark:text-zinc-400">
+                The existing results were produced from this exact repository state. Note: AI-generated findings may vary
+                slightly between scans because LLM responses are not guaranteed to be identical — deterministic analysis
+                (dependencies, duplicates, complexity, architecture, technical debt) remains stable.
+              </p>
+            </div>
+            <div className="px-6 py-4 border-t border-border bg-zinc-50 flex flex-col sm:flex-row gap-2 dark:bg-zinc-900">
+              <button
+                onClick={() => setShowAlreadyAnalyzed(false)}
+                className="flex-1 px-4 py-2.5 border border-border text-xs rounded-lg hover:bg-zinc-100 text-zinc-700 font-bold transition-colors dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                View Previous Scan
+              </button>
+              <button
+                onClick={async () => {
+                  setShowAlreadyAnalyzed(false);
+                  await startScan();
+                }}
+                className="flex-1 px-4 py-2.5 bg-accent-blue hover:bg-blue-600 text-white text-xs rounded-lg font-bold transition-colors"
+              >
+                Scan Again
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Scan Completed Summary — real counts from the latest completed scan */}
+      {showScanSummary && activeRepo && (
+        <ScanSummaryModal
+          analysisId={summaryAnalysisId}
+          repoId={activeRepo.id}
+          onClose={() => setShowScanSummary(false)}
+          onViewDetails={() => setActiveTab("insights")}
+          onDownloadReport={() => {
+            setActiveTab("overview");
+            if (activeAnalysis) handleDownload("PDF");
+          }}
+        />
+      )}
+
       {/* Explain Finding Modal */}
       {explainFinding && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center z-[60] p-4 animate-fade-in">
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center z-[60] p-4 animate-fade-in" role="dialog" aria-modal="true" aria-label="AI explanation of finding">
           <div className="glass-card w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[80vh] overflow-hidden">
             <div className="px-6 py-4 border-b border-border flex justify-between items-center bg-zinc-50 dark:bg-zinc-900">
               <div>
@@ -1317,9 +1433,9 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
       {/* Delete Scan Confirmation Modal */}
       {scanToDelete && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in" role="dialog" aria-modal="true" aria-labelledby="delete-scan-title">
           <div className="glass-card w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
-            <h3 className="text-md font-bold text-zinc-900 font-sans dark:text-white">Delete Scan?</h3>
+            <h3 id="delete-scan-title" className="text-md font-bold text-zinc-900 font-sans dark:text-white">Delete Scan?</h3>
             <p className="text-xs text-zinc-600 leading-relaxed font-sans dark:text-zinc-300">This action cannot be undone.</p>
             <div className="flex gap-3 pt-2 font-sans">
               <button
@@ -1333,7 +1449,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                   try {
                     await deleteAnalysis(scanToDelete);
                   } catch (err: any) {
-                    alert(err.message || "Failed to delete scan");
+                    toast.error(err.message || "Failed to delete scan");
                   } finally {
                     setScanToDelete(null);
                   }
@@ -1349,9 +1465,9 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
       {/* Delete All History Confirmation Modal */}
       {showDeleteAllModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in" role="dialog" aria-modal="true" aria-labelledby="delete-all-title">
           <div className="glass-card w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
-            <h3 className="text-md font-bold text-zinc-900 font-sans dark:text-white">Delete ALL scans?</h3>
+            <h3 id="delete-all-title" className="text-md font-bold text-zinc-900 font-sans dark:text-white">Delete ALL scans?</h3>
             <p className="text-xs text-zinc-600 leading-relaxed font-sans dark:text-zinc-300">This action cannot be undone.</p>
             <div className="flex gap-3 pt-2 font-sans">
               <button
@@ -1365,7 +1481,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
                   try {
                     await deleteAllHistory();
                   } catch (err: any) {
-                    alert(err.message || "Failed to delete all scans");
+                    toast.error(err.message || "Failed to delete all scans");
                   } finally {
                     setShowDeleteAllModal(false);
                   }
@@ -1380,9 +1496,9 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
       )}
       {/* Disconnect Confirmation Modal */}
       {showDisconnectModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in font-sans">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in font-sans" role="dialog" aria-modal="true" aria-labelledby="disconnect-title">
           <div className="glass-card w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
-            <h3 className="text-md font-bold text-zinc-900 dark:text-white">Disconnect Repository?</h3>
+            <h3 id="disconnect-title" className="text-md font-bold text-zinc-900 dark:text-white">Disconnect Repository?</h3>
             <p className="text-xs text-zinc-600 leading-relaxed dark:text-zinc-300">
               Disconnecting will hide this repository from your active workspace but keep its history intact. You can reconnect it at any time.
             </p>
@@ -1409,9 +1525,9 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
       {/* Delete Repository Confirmation Modal */}
       {showDeleteRepoModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in font-sans">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in font-sans" role="dialog" aria-modal="true" aria-labelledby="delete-repo-title">
           <div className="glass-card w-full max-w-sm rounded-2xl p-6 shadow-2xl space-y-4">
-            <h3 className="text-md font-bold text-accent-red">Hard Delete Repository?</h3>
+            <h3 id="delete-repo-title" className="text-md font-bold text-accent-red">Hard Delete Repository?</h3>
             <p className="text-xs text-zinc-600 leading-relaxed dark:text-zinc-300">
               This will permanently delete the repository registration, all scan history, reports, code findings, and patches from the system. <strong>This action cannot be undone.</strong>
             </p>

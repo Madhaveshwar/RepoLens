@@ -55,7 +55,9 @@ Your role is to help users understand:
 **Grounding rules (highest priority):**
 - When scan context is provided, answer about THAT repository using the actual repository name, file paths, line numbers, finding titles, severities and code snippets from the context. Never invent findings, files, or numbers.
 - When asked "why is this issue?" / "what does this finding mean?" / "how can I fix this?" — explain THAT specific finding directly, not a generic tutorial.
-- If a question needs information not in the context (or no scan has been run), say: "Not enough repository information was available to determine this. How about running a scan first?"
+- If NO repository scan context is available and the question is about a specific repository's code/architecture/findings, do NOT invent a repository. Say the repository has not been scanned yet and suggest running a scan first — UNLESS the question is a general knowledge question (e.g. "what is architecture analysis?"), which you answer normally.
+- If the repository scan context does not contain the information needed for the answer, say: "I couldn't find enough evidence in the scanned repository to answer that accurately." Do NOT guess or fill gaps with plausible-sounding details.
+- General questions about programming concepts, tools or RepoLens features should be answered normally with general knowledge — do NOT force repository information into every answer.
 - Do not assume command injection, SQL injection, path traversal etc. unless the actual finding states it.
 - Do not claim tools or scans were used that were not part of RepoLens AI.
 
@@ -396,12 +398,26 @@ async def chat_ask(
     # Build context
     context_str = _build_context_prompt(req.current_page, req.finding_context, latest_scan)
 
+    # Does ANY repository scan context exist for this conversation?
+    has_any_repo_context = has_scan_context or latest_scan is not None
+
     # Build system prompt
     system = ASSISTANT_SYSTEM_PROMPT
     if req.beginner_mode:
         system += "\n\n**⚠️ Beginner mode is ON** — explain everything in simple terms. Define technical terms. Use analogies. Be encouraging."
     if context_str:
         system += f"\n\n## Current Context\n{context_str}"
+    if not has_any_repo_context:
+        # CASE A / C: no repository scan anywhere. Make the absence explicit so
+        # the model cannot hallucinate a repository or invent scan results.
+        # General questions are still answered normally.
+        system += (
+            "\n\n## Current Context\n"
+            "No repository scan context is available for this conversation. "
+            "Answer general questions normally with your own knowledge. If asked about a "
+            "specific repository's code, architecture or findings, state that the repository "
+            "has not been scanned yet and suggest running a scan first."
+        )
 
     # Build messages
     messages = [{"role": "system", "content": system}]
@@ -512,6 +528,14 @@ async def chat_ask_stream(
         system += "\n\n**⚠️ Beginner mode is ON** — explain everything in simple terms. Define technical terms. Use analogies. Be encouraging."
     if context_str:
         system += f"\n\n## Current Context\n{context_str}"
+    if not (has_scan_context or latest_scan is not None):
+        system += (
+            "\n\n## Current Context\n"
+            "No repository scan context is available for this conversation. "
+            "Answer general questions normally with your own knowledge. If asked about a "
+            "specific repository's code, architecture or findings, state that the repository "
+            "has not been scanned yet and suggest running a scan first."
+        )
 
     # Build messages
     messages = [{"role": "system", "content": system}]

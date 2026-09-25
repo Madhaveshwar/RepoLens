@@ -9,7 +9,10 @@ import httpx
 from app.database.database import get_async_db
 
 logger = logging.getLogger(__name__)
-from app.models.models import User, Repository, PullRequest, Analysis, SecurityFinding, HealthScore, Report
+from app.models.models import (
+    User, Repository, PullRequest, Analysis, SecurityFinding, HealthScore, Report,
+    CodeSmell, DependencyFinding, RepositoryHealthSnapshot,
+)
 from app.schemas.schemas import UserOut, CredentialsUpdate, DashboardMetrics
 from app.auth.security import get_current_user
 from app.auth.encryption import encryptor
@@ -736,6 +739,98 @@ async def get_dashboard_metrics(
     )
     model_usage = {row[0] or "unknown": row[1] for row in model_usage_res.all()}
 
+    # 11b. Latest scan summary — the single most recent completed scan across
+    # the user's connected repositories, with "what needs attention" counts
+    # pulled from real persisted rows (severity counts, dependency findings,
+    # code smells, complexity) so the dashboard can answer:
+    # "What problems were found? What should I fix first?"
+    latest_scan_summary = None
+    latest_scan_res = await db.execute(
+        select(Analysis, Repository)
+        .join(Repository, Analysis.repository_id == Repository.id)
+        .where(
+            (Repository.user_id == current_user.id) &
+            (Analysis.status == "completed") &
+            (Analysis.pull_request_id.is_(None)) &
+            ((Repository.is_connected == True) | (Repository.is_connected.is_(None))) &
+            ((Analysis.is_deleted == False) | (Analysis.is_deleted.is_(None)))
+        )
+        .order_by(Analysis.timestamp.desc())
+        .limit(1)
+    )
+    latest_row = latest_scan_res.first()
+    if latest_row:
+        latest_analysis, latest_repo = latest_row
+
+        sec_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
+        latest_sec_res = await db.execute(
+            select(SecurityFinding.severity, func.count(SecurityFinding.id))
+            .where(SecurityFinding.analysis_id == latest_analysis.id)
+            .group_by(SecurityFinding.severity)
+        )
+        for row in latest_sec_res.all():
+            if row[0] in sec_counts:
+                sec_counts[row[0]] = row[1]
+
+        smell_count_res = await db.execute(
+            select(func.count(CodeSmell.id)).where(CodeSmell.analysis_id == latest_analysis.id)
+        )
+        code_quality_issues = smell_count_res.scalar() or 0
+
+        dep_res = await db.execute(
+            select(DependencyFinding.status, func.count(DependencyFinding.id))
+            .where(DependencyFinding.analysis_id == latest_analysis.id)
+            .group_by(DependencyFinding.status)
+        )
+        dep_status = {row[0]: row[1] for row in dep_res.all()}
+        dependency_issues = dep_status.get("known_vulnerable", 0) + dep_status.get("outdated", 0)
+
+        health_res = await db.execute(
+            select(HealthScore.health_score).where(HealthScore.analysis_id == latest_analysis.id)
+        )
+        latest_health = health_res.scalar()
+
+        snap_res = await db.execute(
+            select(RepositoryHealthSnapshot)
+            .where(RepositoryHealthSnapshot.analysis_id == latest_analysis.id)
+            .limit(1)
+        )
+        latest_snapshot = snap_res.scalars().first()
+
+        # Top recommendations derived from the actual counts (real data only).
+        recommendations: list[str] = []
+        if sec_counts["Critical"] > 0:
+            recommendations.append(f"Fix {sec_counts['Critical']} critical security issue(s) first")
+        if sec_counts["High"] > 0:
+            recommendations.append(f"Review {sec_counts['High']} high-severity security finding(s)")
+        if dep_status.get("known_vulnerable", 0) > 0:
+            recommendations.append(f"Update {dep_status['known_vulnerable']} vulnerable dependenc(y/ies)")
+        if code_quality_issues > 0:
+            recommendations.append(f"Refactor {code_quality_issues} code quality issue(s)")
+        if dep_status.get("outdated", 0) > 0:
+            recommendations.append(f"Update {dep_status['outdated']} outdated dependenc(y/ies)")
+        recommendations = recommendations[:4]
+
+        latest_scan_summary = {
+            "repository_id": str(latest_repo.id),
+            "repository": latest_repo.name,
+            "analysis_id": str(latest_analysis.id),
+            "timestamp": latest_analysis.timestamp.isoformat() if latest_analysis.timestamp else None,
+            "branch": latest_snapshot.branch if latest_snapshot else latest_repo.default_branch,
+            "commit_sha": latest_snapshot.commit_sha if latest_snapshot else None,
+            "health_score": latest_health,
+            "risk_score": latest_analysis.risk_score,
+            "files_analyzed": latest_analysis.files_analyzed_count or 0,
+            "attention": {
+                "critical_security": sec_counts["Critical"],
+                "high_security": sec_counts["High"],
+                "medium_security": sec_counts["Medium"],
+                "code_quality": code_quality_issues,
+                "dependencies": dependency_issues,
+            },
+            "recommendations": recommendations,
+        }
+
     # 12. Top risky repositories
     top_risky_repositories = []
     for r_id in repo_ids:
@@ -777,5 +872,6 @@ async def get_dashboard_metrics(
         top_risky_repositories=top_risky_repositories,
         average_scan_duration=average_scan_duration,
         token_consumption=token_consumption,
-        model_usage=model_usage
+        model_usage=model_usage,
+        latest_scan_summary=latest_scan_summary,
     )

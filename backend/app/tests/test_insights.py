@@ -163,6 +163,150 @@ def test_insights_repo_of_other_user_404(client):
     assert resp.status_code == 404
 
 
+# ── 0. Repository overview ───────────────────────────────────────────
+
+def test_overview_requires_auth(client):
+    get_auth_headers(client, "ovauth@example.com")
+    repo_id, _ = seed_repo_with_scan("ovauth@example.com", with_findings=False, with_insights=False)
+    resp = client.get(f"/api/v1/repositories/{repo_id}/overview")
+    assert resp.status_code == 401, "overview should require auth"
+
+
+def test_overview_other_users_repo_404(client):
+    get_auth_headers(client, "ovowner1@example.com")
+    repo_id, _ = seed_repo_with_scan("ovowner1@example.com", with_findings=False, with_insights=False)
+    other_headers = get_auth_headers(client, "ovowner2@example.com")
+    resp = client.get(f"/api/v1/repositories/{repo_id}/overview", headers=other_headers)
+    assert resp.status_code == 404
+
+
+def test_overview_no_scan_returns_honest_empty_state(client):
+    """A repo without a completed scan reports scan=None, not fake data."""
+    get_auth_headers(client, "ovempty@example.com")
+    db = SessionLocal()
+    user = db.query(User).filter_by(email="ovempty@example.com").first()
+    repo = Repository(user_id=user.id, name="owner/insights-repo", default_branch="main")
+    db.add(repo)
+    db.commit()
+    repo_id = str(repo.id)
+    db.close()
+
+    headers = get_auth_headers(client, "ovempty@example.com")
+    resp = client.get(f"/api/v1/repositories/{repo_id}/overview", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["scan"] is None
+    assert "No completed repository scan" in data["message"]
+    assert data["repository"]["name"] == "owner/insights-repo"
+
+
+def test_overview_returns_real_counts_from_persisted_rows(client):
+    """Overview counts must match the persisted findings for this scan."""
+    repo_id, analysis_id = seed_repo_with_scan("ovcounts@example.com", with_findings=True, with_insights=True)
+    headers = get_auth_headers(client, "ovcounts@example.com")
+    resp = client.get(f"/api/v1/repositories/{repo_id}/overview", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    scan = data["scan"]
+    assert scan["analysis_id"] == analysis_id
+    assert scan["health_score"] == 72
+    assert scan["files_analyzed"] == 0  # seeded without file count, still real value
+    counts = data["counts"]
+    assert counts["security_issues"] == 3
+    assert counts["critical_security"] == 1
+    assert counts["high_security"] == 1
+    assert counts["code_smells"] == 1
+    assert counts["dependencies"] == 2
+    assert counts["vulnerable_dependencies"] == 1
+    assert counts["duplicate_blocks"] == 1
+    assert counts["technical_debt"] == 1
+    assert counts["complexity_issues"] == 1
+    assert counts["high_complexity"] == 1
+
+    # Freshness info comes from the seeded snapshot
+    assert scan["branch"] == "main"
+    assert scan["commit_sha"] == "deadbeef"
+
+    # Summary must be present and grounded (either scan report or deterministic)
+    assert data["ai_summary"]
+    assert data["ai_summary_source"] in ("scan_report", "deterministic")
+    assert data["message"] is None
+
+
+def test_overview_invalid_repo_404(client):
+    headers = get_auth_headers(client, "ovinvalid@example.com")
+    resp = client.get(f"/api/v1/repositories/{uuid4()}/overview", headers=headers)
+    assert resp.status_code == 404
+
+
+# ── Scan identity / snapshot tracking ───────────────────────────────
+
+def test_scan_identity_requires_auth(client):
+    get_auth_headers(client, "siauth@example.com")
+    repo_id, _ = seed_repo_with_scan("siauth@example.com", with_findings=False, with_insights=False)
+    resp = client.get(f"/api/v1/repositories/{repo_id}/scan-identity")
+    assert resp.status_code == 401, "scan-identity should require auth"
+
+
+def test_scan_identity_reports_last_scan_commit(client):
+    """With no PAT configured, current head is None but the last scan's
+    persisted commit SHA must still be reported from the health snapshot."""
+    repo_id, _ = seed_repo_with_scan("sihash@example.com", with_findings=True, with_insights=True)
+    headers = get_auth_headers(client, "sihash@example.com")
+    resp = client.get(f"/api/v1/repositories/{repo_id}/scan-identity", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    # Snapshot seeded with commit_sha="deadbeef"
+    assert data["last_scan"]["commit_sha"] == "deadbeef"
+    assert data["last_scan"]["analysis_id"]
+    # No GitHub PAT in test env → current head unavailable, so not "already_analyzed"
+    assert data["current_head_commit"] is None
+    assert data["already_analyzed"] is False
+    assert data["branch"] == "main"
+
+
+def test_scan_identity_no_scan(client):
+    get_auth_headers(client, "sinone@example.com")
+    db = SessionLocal()
+    user = db.query(User).filter_by(email="sinone@example.com").first()
+    repo = Repository(user_id=user.id, name="owner/si-repo", default_branch="main")
+    db.add(repo)
+    db.commit()
+    repo_id = str(repo.id)
+    db.close()
+    headers = get_auth_headers(client, "sinone@example.com")
+    resp = client.get(f"/api/v1/repositories/{repo_id}/scan-identity", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["last_scan"] is None
+    assert data["already_analyzed"] is False
+
+
+def test_dashboard_includes_latest_scan_summary(client):
+    """The simplified dashboard contract: latest scan snapshot with real
+    attention counts and recommendations derived from persisted rows."""
+    repo_id, analysis_id = seed_repo_with_scan("dashsummary@example.com", with_findings=True, with_insights=True)
+    headers = get_auth_headers(client, "dashsummary@example.com")
+    resp = client.get("/api/v1/users/me/dashboard", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    summary = data.get("latest_scan_summary")
+    assert summary is not None
+    assert summary["analysis_id"] == analysis_id
+    assert summary["repository"] == "owner/insights-repo"
+    assert summary["health_score"] == 72
+    assert summary["commit_sha"] == "deadbeef"
+    attention = summary["attention"]
+    assert attention["critical_security"] == 1
+    assert attention["high_security"] == 1
+    assert attention["code_quality"] == 1
+    assert attention["dependencies"] == 1  # 1 known_vulnerable seeded
+    # Recommendations must mention the critical security finding first
+    assert summary["recommendations"]
+    assert "critical security" in summary["recommendations"][0].lower()
+
+
 # ── 1. Health trend ──────────────────────────────────────────────────
 
 def test_health_trend_single_snapshot_requires_multiple(client):

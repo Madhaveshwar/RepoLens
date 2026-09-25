@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import axios from "../../lib/api";
 import { Loader2, GaugeCircle, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import { Pagination } from "../Pagination";
 
 interface ComplexityFinding {
   id: string;
@@ -74,6 +75,14 @@ export const ComplexityPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
     });
     return list;
   }, [findings, severity, language, sortKey, sortDir]);
+
+  // Pagination — resets when filters/sorting change.
+  const CX_PAGE_SIZE = 15;
+  const [cxPage, setCxPage] = useState(1);
+  React.useEffect(() => { setCxPage(1); }, [severity, language, sortKey, sortDir]);
+  const cxTotalPages = Math.max(1, Math.ceil(filtered.length / CX_PAGE_SIZE));
+  const cxSafePage = Math.min(cxPage, cxTotalPages);
+  const pageItems = filtered.slice((cxSafePage - 1) * CX_PAGE_SIZE, cxSafePage * CX_PAGE_SIZE);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -199,7 +208,7 @@ export const ComplexityPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((f) => (
+                {pageItems.map((f) => (
                   <tr key={f.id} className="border-b border-border/20 text-xs align-top hover:bg-zinc-50/50">
                     <td className="py-2.5 px-2 font-mono text-[11px] text-zinc-700 max-w-48 truncate" title={f.file}>
                       {f.file}
@@ -222,6 +231,14 @@ export const ComplexityPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
               </tbody>
             </table>
           </div>
+
+          <Pagination
+            page={cxPage}
+            pageSize={CX_PAGE_SIZE}
+            totalItems={filtered.length}
+            onPageChange={setCxPage}
+            itemLabel="complexity findings"
+          />
 
           {/* Details for high severity */}
           {filtered.some((f) => f.severity === "High" && (f.explanation || f.suggestion)) && (

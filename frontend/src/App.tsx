@@ -13,6 +13,8 @@ import { Dashboard } from "./pages/Dashboard";
 import { RepositoryDetail } from "./pages/RepositoryDetail";
 import { PRReview } from "./pages/PRReview";
 import { Settings } from "./pages/Settings";
+import { Help } from "./pages/Help";
+import { ToastContainer } from "./components/Toast";
 import { Loader2, Shield } from "lucide-react";
 
 export const App: React.FC = () => {
@@ -74,6 +76,14 @@ export const App: React.FC = () => {
     }
   }, [user?.id, isSetupComplete, justLoggedIn]);
 
+  // Safety net: if the active repository disappears (deleted/disconnected)
+  // while the detail view is open, fall back to the dashboard immediately.
+  useEffect(() => {
+    if (activeTab === "repositories" && !activeRepo && !loading) {
+      setActiveTab("dashboard");
+    }
+  }, [activeTab, activeRepo, loading]);
+
   // Restore the last viewed repository on refresh so deep-linking/refresh
   // doesn't dump the user back on the Dashboard.
   useEffect(() => {
@@ -130,28 +140,39 @@ export const App: React.FC = () => {
     }
   };
   if (authPage === "reset") {
-    return <ResetPassword token={resetToken} onNavigateToLogin={navigateBackToLogin} />;
+    return (
+      <>
+        <ResetPassword token={resetToken} onNavigateToLogin={navigateBackToLogin} />
+        <ToastContainer />
+      </>
+    );
   }
 
   // Not authenticated — show landing page first
   if (!token) {
     if (showLanding) {
       return (
-        <Landing
-          onNavigateToLogin={() => { setShowLanding(false); setAuthPage("login"); }}
-          onNavigateToRegister={() => { setShowLanding(false); setAuthPage("register"); }}
-        />
+        <>
+          <Landing
+            onNavigateToLogin={() => { setShowLanding(false); setAuthPage("login"); }}
+            onNavigateToRegister={() => { setShowLanding(false); setAuthPage("register"); }}
+          />
+          <ToastContainer />
+        </>
       );
     }
     if (authPage === "forgot") {
       return (
-        <ForgotPassword
-          onNavigateToLogin={() => setAuthPage("login")}
-          onContinueToReset={(tok) => { setResetToken(tok); setAuthPage("reset"); }}
-        />
+        <>
+          <ForgotPassword
+            onNavigateToLogin={() => setAuthPage("login")}
+            onContinueToReset={(tok) => { setResetToken(tok); setAuthPage("reset"); }}
+          />
+          <ToastContainer />
+        </>
       );
     }
-    return authPage === "login" ? (
+    const authForm = authPage === "login" ? (
       <Login
         onNavigateToRegister={() => setAuthPage("register")}
         onNavigateToForgotPassword={() => setAuthPage("forgot")}
@@ -159,14 +180,23 @@ export const App: React.FC = () => {
     ) : (
       <Register onNavigateToLogin={() => setAuthPage("login")} />
     );
+    return (
+      <>
+        {authForm}
+        <ToastContainer />
+      </>
+    );
   }
 
   // PR review takes priority screen overlay
   if (activePr) {
     return (
-      <PRReview
-        onBack={() => setActivePr(null)}
-      />
+      <>
+        <PRReview
+          onBack={() => setActivePr(null)}
+        />
+        <ToastContainer />
+      </>
     );
   }
 
@@ -174,7 +204,12 @@ export const App: React.FC = () => {
     if (activeTab === "repositories" && activeRepo) {
       return (
         <RepositoryDetail
-          onBack={() => setActiveRepo(null)}
+          onBack={() => {
+            setActiveRepo(null);
+            // Land on the repository list after closing a repo detail view
+            // (also covers the delete/disconnect flow, which clears activeRepo).
+            setActiveTab("dashboard");
+          }}
           onSelectPr={(pr) => setActivePr(pr)}
         />
       );
@@ -200,6 +235,8 @@ export const App: React.FC = () => {
         }} />;
       case "settings":
         return <Settings />;
+      case "help":
+        return <Help />;
       default:
         return <Dashboard onSelectRepoId={() => {}} />;
     }
@@ -215,6 +252,7 @@ export const App: React.FC = () => {
       }} />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {renderContent()}
+        <ToastContainer />
       </div>
 
       {/* AI Review Assistant — ChatBot accessible from all authenticated pages */}

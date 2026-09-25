@@ -1,6 +1,7 @@
 ﻿import React, { useState } from "react";
 import axios from "../lib/api";
 import { Shield, Mail, Lock, Loader2, Eye, EyeOff } from "lucide-react";
+import { toast } from "../components/Toast";
 
 interface RegisterProps {
   onNavigateToLogin: () => void;
@@ -44,6 +45,7 @@ export const Register: React.FC<RegisterProps> = ({ onNavigateToLogin }) => {
         password
       });
       setSuccess(true);
+      toast.success("Account created successfully. You can now sign in.");
       setTimeout(() => {
         onNavigateToLogin();
       }, 2000);
@@ -51,7 +53,9 @@ export const Register: React.FC<RegisterProps> = ({ onNavigateToLogin }) => {
       if (!err.response) {
         setError("Cannot reach the RepoLens AI server. Make sure the backend is running on port 8000, then try again.");
       } else {
-        setError(err.response?.data?.detail || "Registration failed. Try again.");
+        const msg = err.response?.data?.detail || "Registration failed. Try again.";
+        setError(msg);
+        toast.error(msg);
       }
     } finally {
       setLoading(false);
@@ -155,8 +159,14 @@ export const Register: React.FC<RegisterProps> = ({ onNavigateToLogin }) => {
           <button type="submit" disabled={loading || success}
             className="btn-primary w-full flex items-center justify-center gap-2"
           >
-            {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> Registering...</> : "Sign Up"}
+            {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> Creating account...</> : "Sign Up"}
           </button>
+
+          {loading && (
+            <p className="text-[11px] text-zinc-500 text-center dark:text-zinc-400">
+              Securely hashing your password — this can take a few seconds.
+            </p>
+          )}
         </form>
 
         <p className="text-sm text-center text-zinc-800 font-medium mt-8">

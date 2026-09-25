@@ -434,14 +434,16 @@ export const Settings: React.FC = () => {
                       placeholder={hasKey ? "Leave blank to keep current key" : provider.placeholder}
                       value={formKeys[provider.key]}
                       onChange={(e) => setFormKeys((prev) => ({ ...prev, [provider.key]: e.target.value }))}
+                      aria-label={provider.label}
                       className="input-glass text-sm pr-10"
                     />
                     <button
                       type="button"
                       onClick={() => toggleShowKey(provider.key)}
-                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-zinc-400 hover:text-zinc-700 bg-transparent border-0 cursor-pointer"
+                      aria-label={showKeys[provider.key] ? `Hide ${provider.label} value` : `Show ${provider.label} value`}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-zinc-400 hover:text-zinc-700 bg-transparent border-0 cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue rounded"
                     >
-                      {showKeys[provider.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      {showKeys[provider.key] ? <EyeOff className="w-4 h-4" aria-hidden="true" /> : <Eye className="w-4 h-4" aria-hidden="true" />}
                     </button>
                   </div>
                   {provider.docsUrl && (

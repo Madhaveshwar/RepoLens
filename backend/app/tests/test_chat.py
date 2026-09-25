@@ -210,4 +210,106 @@ def test_chat_ask_stream_emits_token_sse_events(client, auth_headers, mock_llm):
     body = resp.text
     assert '"token"' in body
     assert "RepoLens AI" in body
-    assert '"done": true' in body
+
+
+# ── Repository-context behaviour (the 5 required cases) ────────────────────
+
+def _capture_system_prompt(mock_llm) -> str:
+    """Return the system prompt the chat endpoint sent to the LLM.
+
+    mock_llm patches build_llm_client; the endpoint calls .create() on the
+    client that the mocked builder returns.
+    """
+    client = mock_llm.return_value
+    kwargs = client.chat.completions.create.call_args.kwargs
+    return kwargs["messages"][0]["content"]
+
+
+def test_chat_case_a_no_repository_general_question(client, auth_headers, mock_llm):
+    """CASE A — no repo: general questions answered normally, no invented repo."""
+    resp = client.post(
+        "/api/v1/chat/ask",
+        json={"message": "What is architecture analysis?", "current_page": "settings"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    system = _capture_system_prompt(mock_llm)
+    # Explicit no-context instruction is present so no repo is hallucinated
+    assert "No repository scan context is available" in system
+    assert "has not been scanned yet" in system
+
+
+def test_chat_case_b_repository_with_completed_scan_uses_real_data(client, auth_headers, mock_llm):
+    """CASE B — repo scanned: context includes REAL repo name + findings."""
+    scan_ctx = _make_scan_context()  # demo/repo, hardcoded credential @ config.py:10
+    resp = client.post(
+        "/api/v1/chat/ask",
+        json={"message": "Explain the architecture of this repository.",
+              "current_page": "repository", "finding_context": scan_ctx},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    system = _capture_system_prompt(mock_llm)
+    assert "demo/repo" in system
+    assert "Hardcoded credential" in system
+    assert "config.py" in system
+    # Must NOT claim data was unavailable — real context was provided
+    assert "No repository scan context is available" not in system
+
+
+def test_chat_case_c_repository_selected_but_not_scanned(client, auth_headers, mock_llm):
+    """CASE C — repo page but NO completed scan anywhere: prompt must say
+    the repository has not been scanned and suggest running a scan."""
+    with patch("app.routers.chat._load_latest_scan_context", return_value=None):
+        resp = client.post(
+            "/api/v1/chat/ask",
+            json={"message": "Explain the architecture of this repository.",
+                  "current_page": "repository"},
+            headers=auth_headers,
+        )
+    assert resp.status_code == 200
+    system = _capture_system_prompt(mock_llm)
+    assert "not been scanned" in system or "running a scan first" in system
+    # No repository name can leak into the context because none exists
+    assert "Current repository scan context" not in system
+
+
+def test_chat_case_c_stream_repository_not_scanned(client, auth_headers, mock_llm):
+    """CASE C for the streaming endpoint."""
+    with patch("app.routers.chat._load_latest_scan_context", return_value=None):
+        resp = client.post(
+            "/api/v1/chat/ask/stream",
+            json={"message": "Summarize this scan", "current_page": "repository"},
+            headers=auth_headers,
+        )
+    assert resp.status_code == 200
+    system = _capture_system_prompt(mock_llm)
+    assert "not been scanned" in system or "running a scan first" in system
+
+
+def test_chat_case_d_unrelated_question_gets_no_forced_repo_context(client, auth_headers, mock_llm):
+    """CASE D — unrelated question: no repository scan context is injected."""
+    with patch("app.routers.chat._load_latest_scan_context", return_value=None):
+        resp = client.post(
+            "/api/v1/chat/ask",
+            json={"message": "How do I write a Python list comprehension?",
+                  "current_page": "settings"},
+            headers=auth_headers,
+        )
+    assert resp.status_code == 200
+    system = _capture_system_prompt(mock_llm)
+    assert "Current repository scan context" not in system
+    assert "Latest completed repository scan" not in system
+
+
+def test_chat_case_e_missing_evidence_rule_present(client, auth_headers, mock_llm):
+    """CASE E — the grounding rule requiring 'couldn't find enough evidence'
+    must always be part of the system prompt."""
+    resp = client.post(
+        "/api/v1/chat/ask",
+        json={"message": "How many lines does main.py have?", "current_page": "repository"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    system = _capture_system_prompt(mock_llm)
+    assert "couldn't find enough evidence in the scanned repository" in system

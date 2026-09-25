@@ -2,6 +2,7 @@
 import { useAuthStore } from "../store/authStore";
 import axios from "../lib/api";
 import { Shield, Mail, Lock, Loader2, Eye, EyeOff } from "lucide-react";
+import { toast } from "../components/Toast";
 
 interface LoginProps {
   onNavigateToRegister: () => void;
@@ -37,12 +38,15 @@ export const Login: React.FC<LoginProps> = ({ onNavigateToRegister, onNavigateTo
       // (refresh/session-restore is unaffected).
       markJustLoggedIn();
       await initialize();
+      toast.success("Login successful. Welcome back!");
     } catch (err: any) {
       if (!err.response) {
         // Network/CORS failure — the backend is unreachable, not a bad password.
         setError("Cannot reach the RepoLens AI server. Make sure the backend is running on port 8000, then try again.");
       } else {
-        setError(err.response?.data?.detail || "Invalid email or password");
+        const msg = err.response?.data?.detail || "Invalid email or password";
+        setError(msg);
+        toast.error(msg);
       }
     } finally {
       setLoading(false);
@@ -123,6 +127,12 @@ export const Login: React.FC<LoginProps> = ({ onNavigateToRegister, onNavigateTo
           >
             {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> Signing in...</> : "Sign In"}
           </button>
+
+          {loading && (
+            <p className="text-[11px] text-zinc-500 text-center dark:text-zinc-400">
+              Checking your credentials — the server may need a moment if it is waking up.
+            </p>
+          )}
         </form>
 
         <p className="text-sm text-center text-zinc-800 font-medium mt-8">

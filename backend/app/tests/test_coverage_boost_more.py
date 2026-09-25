@@ -79,8 +79,11 @@ def test_csrf_middleware_failures(client):
 
 # --- RATE LIMIT MIDDLEWARE COVERS ---
 @pytest.mark.anyio
-async def test_rate_limit_middleware_exceeded():
+async def test_rate_limit_middleware_exceeded(monkeypatch):
     from app.main import RateLimitMiddleware
+    # The middleware bypasses limiting when TESTING=1 (set by the test env
+    # conftest); clear it so this test exercises the real production path.
+    monkeypatch.delenv("TESTING", raising=False)
     mock_app = MagicMock()
     middleware = RateLimitMiddleware(mock_app, limit=1, window=60)
     

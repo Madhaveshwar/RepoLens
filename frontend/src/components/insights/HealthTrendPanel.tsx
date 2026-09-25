@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import axios from "../../lib/api";
 import { Loader2, Gauge, ArrowUpRight, ArrowDownRight, Minus } from "lucide-react";
+import { formatDateTime, formatDate } from "../../lib/datetime";
 
 interface TrendPoint {
   analysis_id: string;
@@ -143,7 +144,7 @@ export const HealthTrendPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
             <span>Issues: {last.total_issue_count}</span>
           </div>
           <p className="text-[9px] text-zinc-400 mt-1.5">
-            {last.timestamp ? new Date(last.timestamp).toLocaleString() : ""}
+            {last.timestamp ? formatDateTime(last.timestamp) : ""}
             {last.branch ? ` · ${last.branch}` : ""}
           </p>
         </div>
@@ -174,7 +175,7 @@ export const HealthTrendPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
           <div className="flex items-center gap-2 mt-0.5">
             <p className="text-[10px] text-zinc-500">
               {data.snapshot_count} snapshot{data.snapshot_count !== 1 ? "s" : ""}
-              {first.timestamp ? ` · since ${new Date(first.timestamp).toLocaleDateString()}` : ""}
+              {first.timestamp ? ` · since ${formatDate(first.timestamp)}` : ""}
             </p>
             {badge && (
               <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${badge.cls}`}>
@@ -235,8 +236,8 @@ export const HealthTrendPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
             ))}
         </svg>
         <div className="flex justify-between text-[9px] text-zinc-400 mt-1">
-          <span>{first.timestamp ? new Date(first.timestamp).toLocaleDateString() : ""}</span>
-          <span>{last.timestamp ? new Date(last.timestamp).toLocaleDateString() : ""}</span>
+          <span>{first.timestamp ? formatDate(first.timestamp) : ""}</span>
+          <span>{last.timestamp ? formatDate(last.timestamp) : ""}</span>
         </div>
       </div>
 
@@ -289,7 +290,7 @@ export const HealthTrendPanel: React.FC<{ repoId: string }> = ({ repoId }) => {
             {[...points].reverse().map((p) => (
               <tr key={p.analysis_id} className="border-b border-border/20 text-xs">
                 <td className="py-2 px-2 text-zinc-600 whitespace-nowrap">
-                  {p.timestamp ? new Date(p.timestamp).toLocaleDateString() : "—"}
+                  {p.timestamp ? formatDate(p.timestamp) : "—"}
                 </td>
                 <td className="py-2 px-2 font-mono text-[10px] text-zinc-500 max-w-24 truncate" title={p.branch || undefined}>
                   {p.branch || "—"}

@@ -28,7 +28,12 @@ from app.services.llm_client import (
 # Primary review model. For Groq accounts without Enterprise access the
 # create_chat_completion() fallback chain resolves an available model.
 MODEL_NAME = "openai/gpt-oss-120b"
-MODEL_TEMPERATURE = 0.3
+
+# Deterministic analysis requirement: the SAME repository state must produce
+# the SAME findings. Temperature 0 removes sampling randomness from the scan
+# pipeline so repeated scans of one commit return stable issue counts.
+# (Chat/Q&A endpoints keep their own conversational temperatures.)
+MODEL_TEMPERATURE = 0.0
 
 class GroqAPIError(Exception):
     pass
@@ -1089,14 +1094,19 @@ def review_entire_repository(
     start_time = time.time()
     if progress_callback:
         progress_callback(10, "cloning", "Fetching repository file tree from GitHub...")
-    repo = github_service.client.get_repo(repo_name)
+    # PERF: cached Repository object (one API call per scan instead of per request)
+    repo = github_service.get_repo_object(repo_name)
     default_branch = repo.default_branch
  
     tree_items = []
+    head_sha = None
     try:
         branch = repo.get_branch(default_branch)
-        sha = branch.commit.sha
-        git_tree = repo.get_git_tree(sha=sha, recursive=True)
+        # PIN the exact commit: the whole scan (tree + file contents) is
+        # fetched against this SHA so a scan always represents one and the
+        # same repository state — never "whatever the branch points at now".
+        head_sha = branch.commit.sha
+        git_tree = repo.get_git_tree(sha=head_sha, recursive=True)
         tree_items = git_tree.tree
     except Exception as exc:
         print(f"Error fetching repo tree: {exc}")
@@ -1125,7 +1135,11 @@ def review_entire_repository(
             if is_source and not is_test:
                 source_files_with_sizes.append((path, item.size or 0))
  
-    source_files_with_sizes.sort(key=lambda x: x[1], reverse=True)
+    # DETERMINISTIC ORDERING: primary key = size (largest first, so the
+    # most important files are LLM-reviewed), tie-break = path ascending.
+    # Pure size ordering left ties to arbitrary dict order, so two scans
+    # could review DIFFERENT files for the same commit.
+    source_files_with_sizes.sort(key=lambda x: (-x[1], x[0]))
     scanned_files = [path for path, size in source_files_with_sizes[:5]]
     source_files = [path for path, size in source_files_with_sizes]
     
@@ -1146,7 +1160,9 @@ def review_entire_repository(
                 filename
             )
             
-        content = github_service.get_file_content(repo_name, filename, default_branch)
+        # Fetch against the PINNED commit SHA (not the moving branch ref) so
+        # every file in this scan comes from exactly the same snapshot.
+        content = github_service.get_file_content(repo_name, filename, head_sha or default_branch)
         if not content or not is_valid_code(content):
             continue
  
@@ -1170,11 +1186,17 @@ def review_entire_repository(
             "filename": filename, "content": content, "patch": dummy_patch, "language": lang
         })
  
+    # DETERMINISTIC ORDERING of the LLM review batch: alphabetical path.
+    # Chunk grouping and prompt composition then depend only on the commit
+    # content — never on cache state or fetch ordering.
+    files_to_review.sort(key=lambda f: f["filename"])
+
     try:
         repo_metadata = analyze_repository(
             client=client,
             github_service=github_service,
             repo_name=repo_name,
+            ref=head_sha or default_branch,
             qualitative_report="PENDING"
         )
     except Exception as e:
@@ -1277,6 +1299,17 @@ def review_entire_repository(
                     "after_code": item.get("after_code", ""),
                     "source": "ai_analysis",
                 })
+
+        # ── Evidence backfill: replace empty/unverified before_code with the
+        # REAL source line from the fetched content. The LLM may describe the
+        # issue without quoting the code; the line is verified in-file, so
+        # the evidence shown in the UI is actual source (never fabricated).
+        for issue in security_issues + smell_issues + general_issues:
+            if not (issue.get("before_code") or "").strip():
+                ln = issue.get("line") or 0
+                if 1 <= ln <= len(source_lines):
+                    issue["before_code"] = source_lines[ln - 1].strip()[:300]
+                    issue["evidence_verified"] = True
 
         # ── Run static scanners to supplement/correct LLM findings ──
         # Detect language from file extension
@@ -1429,6 +1462,9 @@ def review_entire_repository(
         "repo_analysis": repo_analysis,
         "severity_counts": severity_counts,
         "latency_seconds": latency,
+        # The exact commit this scan analyzed (pinned at scan start).
+        "head_sha": head_sha,
+        "branch": default_branch,
         "total_files_analyzed": len(scanned_files),
         "total_files_count": len(source_files),
         "files_analyzed_log": files_analyzed_log,

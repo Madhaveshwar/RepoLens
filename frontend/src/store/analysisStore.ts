@@ -36,6 +36,12 @@ export interface SecurityFinding {
   suggestion: string;
   before_code?: string;
   after_code?: string;
+  start_line?: number;
+  end_line?: number;
+  code_snippet?: string;
+  issue_explanation?: string;
+  confidence_score?: number;
+  source?: string;
 }
 
 export interface CodeSmell {
@@ -50,6 +56,12 @@ export interface CodeSmell {
   suggestion: string;
   before_code?: string;
   after_code?: string;
+  start_line?: number;
+  end_line?: number;
+  code_snippet?: string;
+  issue_explanation?: string;
+  confidence_score?: number;
+  source?: string;
 }
 
 export interface ProgressDetailed {
