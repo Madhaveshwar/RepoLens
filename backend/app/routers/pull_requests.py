@@ -2,6 +2,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Dict, Any
+import asyncio
 import uuid
 
 from app.database.database import get_async_db
@@ -54,7 +55,10 @@ async def get_pr_files_with_findings(
     pat = encryptor.decrypt(current_user.github_pat_encrypted) if current_user.github_pat_encrypted else settings.GITHUB_TOKEN
     try:
         github_service = GitHubService(token=pat)
-        files = github_service.get_pr_files(repo.name, pr.number)
+        files = await asyncio.wait_for(
+            asyncio.to_thread(github_service.get_pr_files, repo.name, pr.number),
+            timeout=30,
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -202,7 +206,10 @@ async def post_review_to_github_api(
     summary_body += f"- **Maintainability Issues Count:** {len([x for x in inline_comments if 'Quality' in x['body']])}\n"
     summary_body += f"\n*Review generated automatically by RepoLens AI full-stack dashboard.*"
     
-    github_service.post_comment(repo.name, pr.number, summary_body)
+    await asyncio.wait_for(
+        asyncio.to_thread(github_service.post_comment, repo.name, pr.number, summary_body),
+        timeout=30,
+    )
     
     # Post inline comment annotations
     posted, failed = github_service.post_inline_comments(

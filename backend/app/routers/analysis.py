@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -76,11 +78,15 @@ async def trigger_analysis(
     try:
         from app.services.github_service import GitHubService
         github_service = GitHubService(token=pat)
-        # Check permissions
-        gh_repo = github_service.client.get_repo(repo.name)
-        perms = getattr(gh_repo, "permissions", None)
+        # Check permissions — blocking GitHub call runs off the event loop
+        def _check_perms():
+            gh_repo = github_service.client.get_repo(repo.name)
+            return getattr(gh_repo, "permissions", None)
+        perms = await asyncio.wait_for(asyncio.to_thread(_check_perms), timeout=30)
         if perms and not getattr(perms, "pull", True):
              raise Exception("Missing read permissions to fetch code.")
+    except asyncio.TimeoutError:
+        logger.warning(f"GitHub permission check timed out for {repo.name}; proceeding with scan queueing.")
     except Exception as ge:
         logger.error(f"GitHub authorization check failed for repository {repo.name}: {ge}")
         raise HTTPException(

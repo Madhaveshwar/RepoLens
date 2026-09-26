@@ -4,6 +4,56 @@ from app.utils.logger import get_logger
 
 logger = get_logger("github_service")
 
+# Socket timeout for every GitHub API call. PyGithub's default is NO timeout:
+# one stalled connection then blocks forever — and because the sync client is
+# invoked from async endpoints, it would freeze the ENTIRE event loop (observed
+# live: /health stopped responding while a connect call hung). 15s bounds the
+# damage; callers already surface friendly errors for timeouts.
+GITHUB_HTTP_TIMEOUT = 15
+
+# Cap PyGithub's automatic retry backoff. The default GithubRetry sleeps for
+# the FULL primary rate-limit reset window (X-RateLimit-Reset can be 20-60
+# minutes away) INSIDE the calling thread — with the sync client that freezes
+# the worker thread and, when called on the event loop, the whole server
+# (observed live: every endpoint incl. /docs stopped responding). A capped,
+# bounded backoff turns a rate-limited call into a fast GithubException(403)
+# that callers already translate into a friendly error, instead of a stall.
+GITHUB_RETRY_MAX_BACKOFF = 5
+
+
+def _github_retry() -> "object":
+    """GithubRetry with a small retry count and a HARD backoff cap.
+
+    Covers all three backoff sources: primary rate-limit reset window,
+    Retry-After headers (disabled below), and secondary rate-limit waits.
+    """
+    from github.GithubRetry import GithubRetry
+
+    class _CappedGithubRetry(GithubRetry):
+        def increment(self, method=None, url=None, response=None,
+                      error=None, _pool=None, _stacktrace=None):
+            retry = super().increment(method, url, response, error, _pool, _stacktrace)
+            original = retry.get_backoff_time
+
+            def capped() -> float:
+                try:
+                    return min(float(original()), GITHUB_RETRY_MAX_BACKOFF)
+                except Exception:
+                    return GITHUB_RETRY_MAX_BACKOFF
+
+            retry.get_backoff_time = capped  # type: ignore[method-assign]
+            return retry
+
+    return _CappedGithubRetry(
+        total=2,
+        connect=2,
+        read=2,
+        status=2,
+        secondary_rate_wait=GITHUB_RETRY_MAX_BACKOFF,
+        raise_on_status=False,
+        respect_retry_after_header=False,
+    )
+
 def parse_repo_url(url: str) -> str | None:
     if not url:
         return None
@@ -54,9 +104,9 @@ class GitHubService:
         logger.info(f"Initializing GitHubService (has_token: {bool(self.token)}, has_app_integration: {bool(self.integration)})")
         if self.token:
             from github import Auth
-            self.client = Github(auth=Auth.Token(self.token))
+            self.client = Github(auth=Auth.Token(self.token), timeout=GITHUB_HTTP_TIMEOUT, retry=_github_retry())
         else:
-            self.client = Github()
+            self.client = Github(timeout=GITHUB_HTTP_TIMEOUT, retry=_github_retry())
         # PERF: per-repo client and Repository object caches. Previously every
         # get_file_content() call constructed a brand-new Github client AND
         # re-fetched the Repository object — one avoidable API round-trip per
@@ -71,7 +121,7 @@ class GitHubService:
         client: Github | None = None
         if self.token:
             from github import Auth
-            client = Github(auth=Auth.Token(self.token))
+            client = Github(auth=Auth.Token(self.token), timeout=GITHUB_HTTP_TIMEOUT, retry=_github_retry())
         elif self.integration:
             try:
                 parts = repo_name.split("/")

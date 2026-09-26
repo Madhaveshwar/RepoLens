@@ -140,7 +140,9 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_async_db)
         
         logger.info(f"Hashing password and creating new user for {normalized_email}")
         _validate_password(user_in.password)
-        hashed_password = get_password_hash(user_in.password)
+        # Await async hashing (runs off the event loop thread — never blocks
+        # other concurrent requests during the CPU-heavy argon2 work).
+        hashed_password = await get_password_hash(user_in.password)
         new_user = User(
             email=normalized_email,
             hashed_password=hashed_password
@@ -174,7 +176,7 @@ async def login(
     logger.info(f"Login attempt received for email: {form_data.username}")
     try:
         user = await _find_user_by_email(db, form_data.username)
-        if not user or not verify_password(form_data.password, user.hashed_password):
+        if not user or not await verify_password(form_data.password, user.hashed_password):
             logger.warning(f"Failed login attempt for email: {form_data.username}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -333,7 +335,7 @@ async def reset_password(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=invalid_detail)
 
         # Reuse the application's existing password hashing (argon2 via passlib).
-        user.hashed_password = get_password_hash(payload.new_password)
+        user.hashed_password = await get_password_hash(payload.new_password)
 
         # Consume this token and invalidate any other outstanding tokens.
         now = _utcnow()

@@ -4,12 +4,20 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from typing import AsyncGenerator, Generator
 from app.config import settings
 
+# ── Connection pooling ──────────────────────────────────────────────────
+# Reuse pooled connections instead of paying TCP+TLS+auth setup per request
+# (significant against cloud Postgres such as Render).pool_size of 10 with
+# overflow 20 comfortably serves the API; pre_ping guards against stale
+# connections. SQLite (tests) must NOT use pool sizing options.
+_IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
+
 # Async Engine and Session for FastAPI
 async_engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     future=True,
-    pool_pre_ping=True
+    pool_pre_ping=True,
+    **({} if _IS_SQLITE else {"pool_size": 10, "max_overflow": 20, "pool_recycle": 1800}),
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -28,7 +36,8 @@ if sync_db_url.startswith("postgresql+asyncpg://"):
 sync_engine = create_engine(
     sync_db_url,
     echo=False,
-    pool_pre_ping=True
+    pool_pre_ping=True,
+    **({} if sync_db_url.startswith("sqlite") else {"pool_size": 5, "max_overflow": 10, "pool_recycle": 1800}),
 )
 
 SessionLocal = sessionmaker(

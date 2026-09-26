@@ -37,8 +37,8 @@ def seed_repo_with_scan(email="insights@example.com", with_findings=True, with_i
     user = db.query(User).filter_by(email=email).first()
     if user is None:
         # Auto-register via the auth router (needs password hashing context)
-        from app.auth.security import get_password_hash
-        user = User(email=email, hashed_password=get_password_hash("TestPass123"))
+        from app.auth.security import get_password_hash_sync
+        user = User(email=email, hashed_password=get_password_hash_sync("TestPass123"))
         db.add(user)
         db.commit()
     repo = Repository(user_id=user.id, name="owner/insights-repo", default_branch="main")

@@ -7,7 +7,7 @@ import {
 
 /**
  * Help / How RepoLens Works — a single, simple page that explains the whole
- * product to a first-time user, plus the About / project information section.
+ * product to a first-time user.
  * Content is descriptive only; no live data or fabricated examples beyond the
  * clearly-labelled illustration of a finding.
  */
@@ -235,82 +235,6 @@ export const Help: React.FC = () => {
           </ul>
         </Section>
 
-        {/* About */}
-        <Section icon={Shield} title="About RepoLens AI">
-          <p className="text-sm text-zinc-700 dark:text-zinc-300 mb-6">
-            RepoLens AI is an AI-powered GitHub repository analysis platform that
-            helps developers understand the security, quality, architecture and
-            maintainability of their codebase.
-          </p>
-
-          <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mb-3">
-            Capabilities
-          </h3>
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-2 mb-8">
-            {[
-              "Repository Security Analysis",
-              "Code Quality Analysis",
-              "Dependency Analysis",
-              "Duplicate Code Detection",
-              "Complexity Analysis",
-              "Architecture Analysis",
-              "Technical Debt Analysis",
-              "Repository Health",
-              "Pull Request Review",
-              "Commit/Change Analysis",
-              "AI Repository Assistant",
-              "Reports and Exports",
-            ].map((cap) => (
-              <p key={cap} className="text-sm text-zinc-700 dark:text-zinc-300 flex items-center gap-2">
-                <span className="w-1.5 h-1.5 rounded-full bg-accent-blue shrink-0" aria-hidden="true" />
-                {cap}
-              </p>
-            ))}
-          </div>
-
-          <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mb-3">
-            Technology
-          </h3>
-          <dl className="grid sm:grid-cols-2 gap-x-6 gap-y-3 mb-8">
-            {[
-              ["Frontend", "React + TypeScript"],
-              ["Backend", "FastAPI + Python"],
-              ["Repository source", "GitHub API"],
-              ["Database", "PostgreSQL (SQLite in local development)"],
-              ["AI", "Supported LLM providers configured by RepoLens AI"],
-            ].map(([term, desc]) => (
-              <div key={term}>
-                <dt className="text-xs font-bold text-zinc-900 dark:text-zinc-100">{term}</dt>
-                <dd className="text-sm text-zinc-600 dark:text-zinc-400">{desc}</dd>
-              </div>
-            ))}
-          </dl>
-
-          <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mb-3">
-            Project
-          </h3>
-          <div className="text-sm text-zinc-700 dark:text-zinc-300 space-y-1">
-            <p className="font-semibold text-zinc-900 dark:text-zinc-100">
-              Developed as a B.Tech Mini Project
-            </p>
-            <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3 mt-4">
-              <div>
-                <p className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mb-1">Team</p>
-                <p>Eshwar Madhav</p>
-                <p>Penta Arogya Sumanth Reddy</p>
-                <p>Kodithyala Santhosh</p>
-              </div>
-              <div>
-                <p className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mb-1">Guide</p>
-                <p>Dr. V. Biksham</p>
-                <p className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mt-3 mb-1">Department</p>
-                <p>Data Science</p>
-                <p className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mt-3 mb-1">University</p>
-                <p>Anurag University</p>
-              </div>
-            </div>
-          </div>
-        </Section>
       </div>
     </div>
   );

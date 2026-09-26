@@ -77,10 +77,17 @@ def test_explorer_endpoints_flow(mock_gh_repo, mock_gh_explorer, client):
     exp_resp = client.get(f"/api/v1/repositories/{repo_id}/explorer", headers=headers)
     assert exp_resp.status_code == 200
     tree_data = exp_resp.json()
-    assert len(tree_data) == 2  # main.py and utils dir
+    # Response envelope: { tree, ref, branch, snapshot_pinned, truncated }
+    assert "tree" in tree_data
+    assert "snapshot_pinned" in tree_data
+    assert len(tree_data["tree"]) == 2  # main.py and utils dir
     
     # 3. Mock file contents retrieval
-    mock_explorer.get_file_content.return_value = "print('hello world')"
+    mock_file_content = MagicMock()
+    mock_file_content.decoded_content = b"print('hello world')"
+    mock_file_content.size = 22
+    mock_file_content.content = b"x"
+    mock_explorer.client.get_repo.return_value.get_contents.return_value = mock_file_content
     
     file_resp = client.get(
         f"/api/v1/repositories/{repo_id}/files",

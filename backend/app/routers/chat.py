@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Any, AsyncGenerator
 import json
+import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +34,10 @@ class ChatRequest(BaseModel):
     message: str
     current_page: Optional[str] = None           # e.g. "dashboard", "repository", "local-review", "settings"
     finding_context: Optional[dict[str, Any]] = None  # Current finding/report info
+    # Repository-state rule: chat context is REPOSITORY-SPECIFIC. The frontend
+    # sends this ONLY when the user has explicitly opened a repository. When
+    # it is absent, no repository data is injected into the conversation.
+    repository_id: Optional[str] = None
     beginner_mode: bool = False
     conversation_history: Optional[list[dict[str, str]]] = None
 
@@ -119,21 +124,45 @@ def _resolve_llm_key(current_user: User) -> tuple[str, str]:
     return provider, llm_api_key
 
 
-# ── Latest-scan context loader (so shortcuts like "Summarize this scan" work
-#    even from the Dashboard, using the user's most recent completed scan) ──
+# ── Repository-scan context loader (repository-state machine) ───────────
+# Chat context is repository-specific: the loader ONLY returns scan data when
+# the frontend explicitly identifies the active repository, and only after
+# verifying server-side that the repository belongs to the authenticated
+# user. No repository selected → no repository data in the conversation.
 
-async def _load_latest_scan_context(db: AsyncSession, user_id) -> Optional[dict[str, Any]]:
-    """Load the user's most recent completed repository scan with its findings.
+async def _load_latest_scan_context(
+    db: AsyncSession, user_id, repository_id: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    """Load a repository's most recent completed scan with its findings.
 
     Returns a dict in the same shape the frontend sends for repository_scan
-    context, or None when the user has no completed scans.
+    context, or None when:
+      - no repository is selected (repository_id is None) — chat must not
+        silently fall back to "the last scanned repository", or
+      - the repository does not belong to the authenticated user (ownership
+        is verified here; a frontend-supplied id is never trusted), or
+      - the repository has no completed (non-deleted) scan yet.
     """
+    if not repository_id:
+        # No repository selected → no repository context. Never fall back to
+        # the user's most recent scan: that would leak one repository's data
+        # into a conversation about nothing (or about another repository).
+        return None
+    # The UUID column bind processor requires a uuid.UUID object (a raw string
+    # raises AttributeError inside SQLAlchemy on SQLite). Parse defensively —
+    # a malformed id simply means "no context", never an injected fallback.
+    try:
+        repository_uuid = uuid.UUID(str(repository_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
     try:
         result = await db.execute(
             select(Analysis)
             .join(Repository, Analysis.repository_id == Repository.id)
             .where(
-                (Repository.user_id == user_id)
+                (Repository.user_id == user_id)          # ownership check
+                & (Repository.id == repository_uuid)      # repo scoping
+                & (Analysis.repository_id == repository_uuid)
                 & (Analysis.status == "completed")
                 & ((Analysis.is_deleted == False) | (Analysis.is_deleted.is_(None)))
             )
@@ -389,11 +418,13 @@ async def chat_ask(
             detail="No LLM API key is configured. Please add one in Settings."
         )
 
-    # Load the user's latest completed scan from the DB when the frontend
-    # didn't send scan data itself (e.g. Dashboard has none) so questions like
-    # "Summarize this scan" always have real data to answer from.
+    # Repository-state machine: only load scan context for the EXPLICITLY
+    # selected repository (sent by the frontend only when the user has opened
+    # one). No repository selected → no repository data in the conversation.
     has_scan_context = bool(req.finding_context and req.finding_context.get("type") == "repository_scan")
-    latest_scan = None if has_scan_context else await _load_latest_scan_context(db, current_user.id)
+    latest_scan = None if has_scan_context else await _load_latest_scan_context(
+        db, current_user.id, req.repository_id
+    )
 
     # Build context
     context_str = _build_context_prompt(req.current_page, req.finding_context, latest_scan)
@@ -513,11 +544,13 @@ async def chat_ask_stream(
             detail="No LLM API key is configured. Please add one in Settings."
         )
 
-    # Load the user's latest completed scan from the DB when the frontend
-    # didn't send scan data itself (e.g. Dashboard has none) so questions like
-    # "Summarize this scan" always have real data to answer from.
+    # Repository-state machine: only load scan context for the EXPLICITLY
+    # selected repository (sent by the frontend only when the user has opened
+    # one). No repository selected → no repository data in the conversation.
     has_scan_context = bool(req.finding_context and req.finding_context.get("type") == "repository_scan")
-    latest_scan = None if has_scan_context else await _load_latest_scan_context(db, current_user.id)
+    latest_scan = None if has_scan_context else await _load_latest_scan_context(
+        db, current_user.id, req.repository_id
+    )
 
     # Build context
     context_str = _build_context_prompt(req.current_page, req.finding_context, latest_scan)

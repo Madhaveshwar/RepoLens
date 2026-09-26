@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Optional
+import asyncio
 import uuid
 
 from app.database.database import get_async_db
@@ -662,7 +663,13 @@ async def list_pull_requests_for_review(
     github_service = _github_service_or_403(current_user)
 
     try:
-        prs = github_service.get_open_pull_requests(repo.name)
+        prs = await asyncio.wait_for(
+            asyncio.to_thread(github_service.get_open_pull_requests, repo.name),
+            timeout=30,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                            detail="GitHub did not respond in time while listing pull requests.")
     except Exception as exc:
         logger.error(f"Failed to list PRs for {repo.name}: {exc}")
         raise HTTPException(
@@ -766,7 +773,13 @@ async def review_pull_request_endpoint(
 
     # ── Fetch real PR data ─────────────────────────────────────────
     try:
-        pr_details = github_service.get_pr_details(repo.name, pr_number)
+        pr_details = await asyncio.wait_for(
+            asyncio.to_thread(github_service.get_pr_details, repo.name, pr_number),
+            timeout=30,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                            detail="GitHub did not respond in time while fetching PR details.")
     except Exception as exc:
         logger.error(f"Failed to fetch PR #{pr_number} on {repo.name}: {exc}")
         raise HTTPException(
@@ -775,7 +788,13 @@ async def review_pull_request_endpoint(
         )
 
     try:
-        pr_files = github_service.get_pr_files(repo.name, pr_number)
+        pr_files = await asyncio.wait_for(
+            asyncio.to_thread(github_service.get_pr_files, repo.name, pr_number),
+            timeout=30,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                            detail="GitHub did not respond in time while fetching PR files.")
     except Exception as exc:
         logger.error(f"Failed to fetch PR files for #{pr_number}: {exc}")
         raise HTTPException(

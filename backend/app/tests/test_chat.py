@@ -99,8 +99,8 @@ async def test_load_latest_scan_context_returns_latest_completed_scan(client):
         db.add(CodeSmell(analysis_id=newer.id, issue="Newest smell", severity="low", file="b.py", line=2, suggestion="Refactor"))
         await db.commit()
 
-        # Act
-        ctx = await _load_latest_scan_context(db, uid)
+        # Act — context is loaded ONLY for the explicitly selected repository
+        ctx = await _load_latest_scan_context(db, uid, str(repo.id))
 
         # Assert: picks the *newest* completed scan and includes its findings
         assert ctx is not None

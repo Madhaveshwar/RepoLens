@@ -29,6 +29,62 @@ from app.services.llm_client import (
 # create_chat_completion() fallback chain resolves an available model.
 MODEL_NAME = "openai/gpt-oss-120b"
 
+# ── Complete-file chunking constants ────────────────────────────────────
+# Every supported source file is analyzed in FULL. Large files are split into
+# deterministic line chunks; chunk results are remapped back to ORIGINAL file
+# line numbers before any finding is emitted.
+CHUNK_LINES = 400          # lines per chunk (chunk 1: 1-400, chunk 2: 401-800, ...)
+CHUNK_MAX_CHARS = 14_000   # per-chunk character budget for the LLM prompt
+MAX_FILES_PER_CHUNK = 4    # small files may share a chunk
+
+
+def build_file_chunks(content: str) -> list[dict]:
+    """Split a complete file into deterministic line-based chunks.
+
+    Each chunk carries its 1-based start_line so findings reported relative to
+    the chunk can be remapped to the ORIGINAL file line numbers
+    (original_line = chunk.start_line + relative_line - 1).
+
+    The file is never truncated: the final chunk may be shorter, and empty
+    files produce a single empty chunk so they are still processed.
+    """
+    lines = content.splitlines()
+    total = len(lines)
+    chunks = []
+    if total == 0:
+        return [{"start_line": 1, "end_line": 0, "content": "", "chunk_index": 0, "total_chunks": 1}]
+    step = CHUNK_LINES
+    idx = 0
+    while idx * step < total:
+        start = idx * step  # 0-based
+        end = min(start + step, total)  # exclusive
+        chunk_content = "\n".join(lines[start:end])
+        chunks.append({
+            "start_line": start + 1,               # 1-based original line number
+            "end_line": end,                       # 1-based inclusive
+            "content": chunk_content,
+            "chunk_index": idx,
+            "total_chunks": (total + step - 1) // step,
+        })
+        idx += 1
+    return chunks
+
+
+def remap_finding_lines(findings: list, chunk_start_line: int) -> list:
+    """Remap chunk-relative line numbers to ORIGINAL file line numbers."""
+    remapped = []
+    for item in findings or []:
+        if not isinstance(item, dict):
+            continue
+        new_item = dict(item)
+        rel = item.get("line")
+        if str(rel).isdigit():
+            new_item["line"] = chunk_start_line + int(rel) - 1
+        if str(item.get("end_line", "")).isdigit():
+            new_item["end_line"] = chunk_start_line + int(item.get("end_line")) - 1
+        remapped.append(new_item)
+    return remapped
+
 # Deterministic analysis requirement: the SAME repository state must produce
 # the SAME findings. Temperature 0 removes sampling randomness from the scan
 # pipeline so repeated scans of one commit return stable issue counts.
@@ -282,13 +338,15 @@ def build_multi_file_prompt(files_to_review: list[dict], repo_metadata: dict | N
     prompt_parts = []
     prompt_parts.append("Please perform a review for the following files:")
     for f in files_to_review:
+        start_line = f.get("start_line_hint", 1)
         prompt_parts.append(f"--- File: {f['filename']} ---")
         prompt_parts.append(f"Language: {f['language']}")
+        prompt_parts.append(f"NOTE: The excerpt below starts at line {start_line} of the file. When reporting a `line` number, report the line number WITHIN THIS EXCERPT (line 1 = original line {start_line}). The system adds the offset automatically.")
         prompt_parts.append("Diff Patch (what was changed):")
         prompt_parts.append("```diff")
         prompt_parts.append(f["patch"])
         prompt_parts.append("```")
-        prompt_parts.append("Full file content (truncated, for context):")
+        prompt_parts.append(f"Full file content (excerpt from line {start_line}; the complete file is analyzed in chunks):")
         prompt_parts.append("```")
         prompt_parts.append(f["content"])
         prompt_parts.append("```")
@@ -329,13 +387,12 @@ def review_files_combined(
     
     for f in files_to_review:
         fname = f["filename"]
+        # Hash the COMPLETE file content (never a truncated prefix) so a cache
+        # hit genuinely means this exact file content was already reviewed.
         content = f["content"]
-        if len(content) > 1000:
-            content = content[:1000]
-        
         content_hash = get_file_hash(content)
         f["hash"] = content_hash
-        f["truncated_content"] = content
+        f["truncated_content"] = content  # backward-compatible field name; holds FULL content
         
         logger.info(f"Cache key generated for file {fname}: {content_hash}")
         
@@ -360,7 +417,8 @@ def review_files_combined(
                 logger.info(f"Cache MISS for file: {fname}")
             uncached_files.append(f)
 
-    scanned_files_hash = hashlib.sha256("".join(sorted(get_file_hash(f["content"][:1000]) for f in files_to_review)).encode()).hexdigest()
+    # Identity hash over the COMPLETE contents of every reviewed file.
+    scanned_files_hash = hashlib.sha256("".join(sorted(get_file_hash(f["content"]) for f in files_to_review)).encode()).hexdigest()
     repo_report_key = f"repo_report_{repo_name}_{scanned_files_hash}" if repo_name else None
     if repo_report_key:
         logger.info(f"Cache key generated for repository report: {repo_report_key}")
@@ -393,28 +451,52 @@ def review_files_combined(
     }
     
     if uncached_files or need_repo_insights:
-        # 1. Chunking logic
+        # ── COMPLETE-FILE CHUNKING ──────────────────────────────────────
+        # Every uncached file is split into deterministic LINE chunks
+        # (build_file_chunks) and EVERY chunk is sent to the LLM. Large files
+        # are never truncated: chunk 2 reports line 20 as original line 520
+        # via chunk start_line remapping.
+        llm_units = []  # each unit = one reviewable piece of one file
+        for f in uncached_files:
+            content = f["content"] or ""
+            file_chunks = build_file_chunks(content)
+            for ch in file_chunks:
+                llm_units.append({
+                    "file": f,
+                    "chunk": ch,
+                    "chars": len(ch["content"]) + len(f.get("patch", "") or ""),
+                })
+
         chunks = []
         current_chunk = []
         current_chunk_chars = 0
-        
-        for f in uncached_files:
-            file_chars = len(f.get("patch", "")) + len(f.get("content", ""))
-            # Max 4 files or 15000 characters per chunk
-            if (current_chunk and len(current_chunk) >= 4) or (current_chunk_chars + file_chars > 15000):
+        for unit in llm_units:
+            u = unit["file"]
+            ch = unit["chunk"]
+            unit_chars = unit["chars"]
+            oversized = unit_chars > CHUNK_MAX_CHARS
+            # Pack units into prompt batches: max N files, max chars; a single
+            # oversized chunk goes alone in its own batch.
+            if current_chunk and (len(current_chunk) >= MAX_FILES_PER_CHUNK or current_chunk_chars + unit_chars > CHUNK_MAX_CHARS):
                 chunks.append(current_chunk)
-                current_chunk = [f]
-                current_chunk_chars = file_chars
-            else:
-                current_chunk.append(f)
-                current_chunk_chars += file_chars
+                current_chunk = []
+                current_chunk_chars = 0
+            if oversized:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = []
+                    current_chunk_chars = 0
+                chunks.append([unit])
+                continue
+            current_chunk.append(unit)
+            current_chunk_chars += unit_chars
         if current_chunk:
             chunks.append(current_chunk)
-            
+
         if not chunks and need_repo_insights:
             chunks = [[]]
-            
-        logger.info(f"Diff chunking enabled: Split {len(uncached_files)} files into {len(chunks)} chunk(s) for LLM API.")
+
+        logger.info(f"Complete-file chunking enabled: {len(uncached_files)} file(s) split into {len(chunks)} LLM prompt batch(es).")
         
         total_sec = 0
         total_smells = 0
@@ -422,7 +504,17 @@ def review_files_combined(
         for chunk_idx, files_chunk in enumerate(chunks):
             # For each chunk, determine if repo insights should be fetched (only on the first chunk)
             chunk_need_insights = need_repo_insights and (chunk_idx == 0)
-            prompt = build_multi_file_prompt(files_chunk, repo_metadata if chunk_need_insights else None)
+            # files_chunk is now a list of {file, chunk} units — build the
+            # prompt against each unit's chunk slice.
+            prompt_units = []
+            for unit in files_chunk:
+                u = dict(unit["file"])
+                ch = unit["chunk"]
+                u["content"] = ch["content"]
+                if str(ch.get("start_line", 1)).isdigit():
+                    u["start_line_hint"] = ch["start_line"]
+                prompt_units.append(u)
+            prompt = build_multi_file_prompt(prompt_units, repo_metadata if chunk_need_insights else None)
             prompt_len = len(prompt)
             
             logger.info(f"Chunk {chunk_idx+1}/{len(chunks)}: Prompt size={prompt_len} chars, files={len(files_chunk)}")
@@ -489,30 +581,44 @@ def review_files_combined(
                 continue
                 
             files_reviews_data = parsed.get("files_reviews", {})
-            for f in files_chunk:
+            for unit in files_chunk:
+                f = unit["file"]
+                ch = unit["chunk"]
                 fname = f["filename"]
                 fhash = f["hash"]
                 
                 file_parsed = files_reviews_data.get(fname, {})
-                total_sec += len(file_parsed.get("security_findings", []))
-                total_smells += len(file_parsed.get("code_smells", []))
+                # Remap chunk-relative lines to ORIGINAL file line numbers
+                # BEFORE caching or merging, so cached results always carry
+                # absolute lines (chunk 2 line 20 → file line 520).
+                remapped_sec = remap_finding_lines(file_parsed.get("security_findings", []), ch["start_line"])
+                remapped_smells = remap_finding_lines(file_parsed.get("code_smells", []), ch["start_line"])
+                remapped_inline = remap_finding_lines(file_parsed.get("inline_comments", []), ch["start_line"])
+                total_sec += len(remapped_sec)
+                total_smells += len(remapped_smells)
                 
-                cache[fhash] = {
-                    "security_findings": file_parsed.get("security_findings", []),
-                    "code_smells": file_parsed.get("code_smells", []),
-                    "inline_comments": file_parsed.get("inline_comments", []),
-                    "test_suggestions": file_parsed.get("test_suggestions", ""),
-                    "severity_score": file_parsed.get("severity_score", 0),
-                    "scores": file_parsed.get("scores", {})
+                # ACCUMULATE per-file results across all chunks of the file
+                # (a 5,000-line file produces multiple chunk results that must
+                # be combined, then deduplicated).
+                prev = files_reviews_map.get(fname, {})
+                files_reviews_map[fname] = {
+                    "security_findings": update_findings_file(merge_and_dedupe_findings(prev.get("security_findings", []), remapped_sec), fname),
+                    "code_smells": update_findings_file(merge_and_dedupe_findings(prev.get("code_smells", []), remapped_smells), fname),
+                    "inline_comments": update_findings_file(merge_and_dedupe_findings(prev.get("inline_comments", []), remapped_inline), fname),
+                    "test_suggestions": "\n".join(x for x in [prev.get("test_suggestions", ""), file_parsed.get("test_suggestions", "")] if x),
+                    "severity_score": max(prev.get("severity_score", 0), file_parsed.get("severity_score", 0)),
+                    "scores": file_parsed.get("scores", prev.get("scores", {})),
                 }
                 
-                files_reviews_map[fname] = {
-                    "security_findings": update_findings_file(file_parsed.get("security_findings", []), fname),
-                    "code_smells": update_findings_file(file_parsed.get("code_smells", []), fname),
-                    "inline_comments": update_findings_file(file_parsed.get("inline_comments", []), fname),
-                    "test_suggestions": file_parsed.get("test_suggestions", ""),
-                    "severity_score": file_parsed.get("severity_score", 0),
-                    "scores": file_parsed.get("scores", {})
+                # Cache accumulates across chunks too (keyed by full content hash)
+                cached_entry = cache.get(fhash, {})
+                cache[fhash] = {
+                    "security_findings": update_findings_file(merge_and_dedupe_findings(cached_entry.get("security_findings", []), remapped_sec), fname),
+                    "code_smells": update_findings_file(merge_and_dedupe_findings(cached_entry.get("code_smells", []), remapped_smells), fname),
+                    "inline_comments": update_findings_file(merge_and_dedupe_findings(cached_entry.get("inline_comments", []), remapped_inline), fname),
+                    "test_suggestions": "\n".join(x for x in [cached_entry.get("test_suggestions", ""), file_parsed.get("test_suggestions", "")] if x),
+                    "severity_score": max(cached_entry.get("severity_score", 0), file_parsed.get("severity_score", 0)),
+                    "scores": file_parsed.get("scores", cached_entry.get("scores", {})),
                 }
                 
             if chunk_need_insights:
@@ -527,6 +633,21 @@ def review_files_combined(
     cache_hits = len(files_to_review) - len(uncached_files)
     logger.info(f"Combined files review completed. Cache Hits: {cache_hits}/{len(files_to_review)}, Requests Made: {requests_made}")
     return files_reviews_map, cache_hits, repo_insights, requests_made, characters_sent, token_stats
+
+def merge_and_dedupe_findings(existing: list, new: list) -> list:
+    """Merge two finding lists and deduplicate by (line, issue)."""
+    seen = set()
+    merged = []
+    for item in list(existing or []) + list(new or []):
+        if not isinstance(item, dict):
+            continue
+        key = (str(item.get("line", "")), str(item.get("issue", ""))[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
 
 def review_file_combined(
     client: Any,
@@ -694,9 +815,8 @@ def review_pull_request(
             })
             continue
 
-        if len(content) > 1000:
-            content = content[:1000]
-
+        # NO TRUNCATION: the complete PR file content is reviewed — large
+        # files are chunked with original line offsets by review_files_combined.
         lang = language_mapping.get(filename, detected_lang)
         files_to_review.append({
             "filename": filename, "content": content, "patch": patch, "language": lang
@@ -898,26 +1018,25 @@ def review_single_code_snippet(
             "validation_message": validation_msg
         }
 
-    truncated_code = code
-    if len(truncated_code) > 1000:
-        truncated_code = truncated_code[:1000]
-
+    # NO TRUNCATION for snippet scans either: review_single_code_snippet now
+    # delegates to review_files_combined, whose complete-file chunking handles
+    # large snippets with original line offsets.
     filename = "snippet.py" if detected_lang == "Python" else f"snippet.{detected_lang[:3].lower()}"
-    dummy_patch = f"@@ -1,1 +1,{len(truncated_code.splitlines())} @@\n" + "\n".join(f"+{line}" for line in truncated_code.splitlines())
+    dummy_patch = f"@@ -1,1 +1,{len(code.splitlines())} @@\n" + "\n".join(f"+{line}" for line in code.splitlines())
 
     user_prompt = f"""Review the following code snippet.
 Language: {detected_lang}
 
 Code Snippet content:
 ```{detected_lang.lower()}
-{truncated_code}
+{code}
 ```
 """
 
     groq_requests_made = 0
     cached_results_used = 0
     
-    content_hash = get_file_hash(truncated_code)
+    content_hash = get_file_hash(code)  # hash the COMPLETE snippet
     cache = load_cache()
     
     force_groq = settings.FORCE_GROQ_ANALYSIS
@@ -1042,7 +1161,7 @@ Code Snippet content:
 
     latency = round(time.time() - start_time, 2)
     files_analyzed_count = 1
-    characters_analyzed_count = 0 if was_cached else len(truncated_code)
+    characters_analyzed_count = 0 if was_cached else len(code)
     estimated_tokens_count = characters_analyzed_count // 4
 
     snippet_scores = resolve_scores([res_dict.get("scores", {})], risk_score, severity_counts)
@@ -1140,8 +1259,11 @@ def review_entire_repository(
     # Pure size ordering left ties to arbitrary dict order, so two scans
     # could review DIFFERENT files for the same commit.
     source_files_with_sizes.sort(key=lambda x: (-x[1], x[0]))
-    scanned_files = [path for path, size in source_files_with_sizes[:5]]
-    source_files = [path for path, size in source_files_with_sizes]
+    # EVERY supported source file is considered for analysis — no arbitrary
+    # 5-file cutoff. Deterministic ordering (largest first, path tie-break)
+    # keeps fetch order stable for the same commit.
+    scanned_files = [path for path, size in source_files_with_sizes]
+    source_files = scanned_files
     
     files_to_review = []
     if not language_mapping:
@@ -1166,9 +1288,8 @@ def review_entire_repository(
         if not content or not is_valid_code(content):
             continue
  
-        if len(content) > 1000:
-            content = content[:1000]
- 
+        # NO TRUNCATION: the complete file content is reviewed (chunked into
+        # deterministic pieces by review_files_combined).
         ext = os.path.splitext(filename)[1].lower()
         ext_map = {
             ".py": "Python", ".js": "JavaScript", ".jsx": "JavaScript",
@@ -1403,6 +1524,17 @@ def review_entire_repository(
         })
 
     files_analyzed_log = []
+    # Honest per-file accounting: every tree blob gets exactly one entry whose
+    # status reflects what actually happened:
+    #   analyzed       → reviewed by the LLM/static scanners (findings counted)
+    #   skipped        → ignored pattern (deps/binary/generated) — real reason
+    #   unsupported    → not a supported source extension
+    #   failed         → fetch/validation failed — reason recorded
+    analyzed_files_set = {f["filename"] for f in files_to_review}
+    fetched_failed = set()
+    for path, _size in source_files_with_sizes:
+        if path not in analyzed_files_set:
+            fetched_failed.add(path)
     for item in tree_items:
         if item.type == "blob":
             path = item.path
@@ -1422,23 +1554,33 @@ def review_entire_repository(
                 file_type = "Configuration"
 
             is_source = detected_lang != "Other"
-            
-            if should_skip_file(path):
-                files_analyzed_log.append({
-                    "file": path, "type": file_type, "status": "Skipped", "findings": 0
-                })
-            elif path in scanned_files:
+
+            if path in analyzed_files_set:
                 file_findings_count = len([fn for fn in all_findings if fn["file"] == path])
                 files_analyzed_log.append({
                     "file": path, "type": file_type, "status": "Analyzed", "findings": file_findings_count
                 })
+            elif should_skip_file(path):
+                files_analyzed_log.append({
+                    "file": path, "type": file_type, "status": "Skipped",
+                    "reason": "ignored pattern (build artifact, dependency lock, binary or generated file)",
+                    "findings": 0
+                })
+            elif path in fetched_failed:
+                files_analyzed_log.append({
+                    "file": path, "type": file_type, "status": "Failed",
+                    "reason": "content fetch or code validation failed (empty, binary or non-source content)",
+                    "findings": 0
+                })
             elif is_source:
                 files_analyzed_log.append({
-                    "file": path, "type": file_type, "status": "Scanned", "findings": 0
+                    "file": path, "type": file_type, "status": "Unsupported", "findings": 0
                 })
             else:
                 files_analyzed_log.append({
-                    "file": path, "type": file_type, "status": "Skipped", "findings": 0
+                    "file": path, "type": file_type, "status": "Skipped",
+                    "reason": "not a supported source file",
+                    "findings": 0
                 })
 
     test_suggestions_md = []

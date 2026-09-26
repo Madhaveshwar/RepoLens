@@ -168,6 +168,133 @@ else:
     run_analysis_task.delay = lambda analysis_id=None: run_analysis_task(analysis_id=analysis_id)
 
 
+# Bump when the scan pipeline/prompts change in a way that should invalidate
+# previously stored results (same commit + same version ⇒ reuse stored result).
+ANALYSIS_VERSION = "v2-full-file-chunked"
+
+
+def build_scan_cache_key(repository_id, commit_sha: str, provider: str, model_name: str) -> str:
+    import hashlib
+    raw = f"{repository_id}|{commit_sha}|{ANALYSIS_VERSION}|{provider}|{model_name}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _store_result_cache(db, repo, commit_sha, provider: str, model_name: str, results: dict):
+    """Persist a completed full-scan result for deterministic future reuse.
+
+    Stored in PostgreSQL (analysis_result_cache) — the durable source of truth
+    that survives Render restarts/redeploys, unlike the local JSON cache.
+    """
+    from app.models.models import AnalysisResultCache
+    if not commit_sha:
+        logger.warning("Result cache store skipped: no commit SHA resolved for this scan.")
+        return
+    cache_key = build_scan_cache_key(repo.id, commit_sha, provider, model_name)
+    existing = db.query(AnalysisResultCache).filter(AnalysisResultCache.cache_key == cache_key).first()
+    if existing:
+        return  # already stored
+    db.add(AnalysisResultCache(
+        repository_id=repo.id,
+        commit_sha=commit_sha,
+        analysis_version=ANALYSIS_VERSION,
+        cache_key=cache_key,
+        provider=provider,
+        model_name=model_name,
+        result_json=results,
+        hit_count=0,
+    ))
+    db.commit()
+    logger.info(f"Result cache stored for commit {commit_sha[:8]} (provider={provider}, model={model_name}).")
+
+
+def _materialize_cached_result(db, analysis, payload: dict, provider: str, model_name: str):
+    """Create a completed Analysis from a stored (cached) scan result.
+
+    Rebuilds persisted findings, health score, test suggestions and metrics
+    from the stored payload WITHOUT calling the LLM.
+    """
+    import uuid as std_uuid
+    analysis_id = analysis.id
+    results = payload
+
+    analysis.risk_score = results.get("risk_score", 0)
+    analysis.latency_seconds = int(results.get("latency_seconds", 0) or 0)
+    analysis.estimated_token_usage = results.get("estimated_token_usage", 0)
+    analysis.files_analyzed_count = results.get("files_analyzed_count", 0)
+    analysis.characters_analyzed_count = results.get("characters_analyzed_count", 0)
+    analysis.groq_requests_made = 0  # no LLM calls were made
+    analysis.cached_results_used = results.get("cached_results_used", 0) or 1
+    analysis.model_name = (results.get("token_stats") or {}).get("model_name") or model_name
+    analysis.analysis_version = ANALYSIS_VERSION
+    if results.get("head_sha"):
+        analysis.commit_sha = results.get("head_sha")
+    if results.get("branch"):
+        analysis.branch = results.get("branch")
+
+    t_stats = results.get("token_stats") or {}
+    analysis.prompt_tokens = t_stats.get("prompt_tokens") or 0
+    analysis.completion_tokens = t_stats.get("completion_tokens") or 0
+    analysis.total_tokens = t_stats.get("total_tokens") or 0
+    analysis.timestamp = datetime.now(timezone.utc)
+
+    persisted_findings = sorted(
+        results.get("findings", []),
+        key=lambda f: (str(f.get("file", "")), int(f.get("line", 0) or 0), str(f.get("issue", "")))
+    )
+    for f in persisted_findings:
+        if f.get("category") == "Security":
+            db.add(SecurityFinding(
+                analysis_id=analysis_id,
+                file=f.get("file"), line=f.get("line"), severity=f.get("severity"),
+                issue=f.get("issue"), why_it_matters=f.get("why_it_matters"),
+                risk_level=f.get("risk_level"), suggestion=f.get("suggestion"),
+                before_code=f.get("before_code"), after_code=f.get("after_code"),
+                start_line=f.get("start_line", f.get("line")),
+                end_line=f.get("end_line", f.get("line")),
+                code_snippet=f.get("before_code"),
+                issue_explanation=f.get("why_it_matters"),
+                source=f.get("source"),
+            ))
+        elif f.get("category") == "Code Smell":
+            db.add(CodeSmell(
+                analysis_id=analysis_id,
+                file=f.get("file"), line=f.get("line"), severity=f.get("severity"),
+                issue=f.get("issue"), why_it_matters=f.get("why_it_matters"),
+                risk_level=f.get("risk_level"), suggestion=f.get("suggestion"),
+                before_code=f.get("before_code"), after_code=f.get("after_code"),
+                start_line=f.get("start_line", f.get("line")),
+                end_line=f.get("end_line", f.get("line")),
+                code_snippet=f.get("before_code"),
+                issue_explanation=f.get("why_it_matters"),
+                source=f.get("source"),
+            ))
+
+    test_suggs = results.get("test_suggestions", "")
+    if test_suggs:
+        db.add(TestSuggestion(analysis_id=analysis_id, file="combined_suggestions", content=test_suggs))
+
+    repo_an = results.get("repo_analysis")
+    if repo_an:
+        db.add(HealthScore(
+            analysis_id=analysis_id,
+            health_score=repo_an.get("health_score", 100),
+            deductions=repo_an.get("deductions", []),
+            readme_exists=repo_an.get("readme_exists", False),
+            large_files=repo_an.get("large_files", []),
+            security_hotspots=repo_an.get("security_hotspots", []),
+            missing_tests=repo_an.get("missing_tests", []),
+            test_files_count=repo_an.get("test_files_count", 0),
+            source_files_count=repo_an.get("source_files_count", 0),
+            docstring_coverage=repo_an.get("docstring_coverage", 0),
+        ))
+        analysis.insights = repo_an.get("analysis_report")
+    else:
+        analysis.insights = "Stored analysis for this exact commit was reused (no LLM calls were made)."
+
+    db.commit()
+    logger.info(f"Materialized cached analysis {analysis_id} from stored result (commit {analysis.commit_sha}).")
+
+
 def enqueue_analysis_task(background_tasks, analysis_id: str):
     """
     Enqueue an analysis task for asynchronous execution.
@@ -289,6 +416,54 @@ def _run_analysis_impl(self, analysis_id: str):
         github_service = GitHubService(token=pat)
         llm_client = build_llm_client(provider, llm_api_key)
 
+        # ── DETERMINISTIC RESULT REUSE (PostgreSQL-backed) ─────────────
+        # Same repository + same commit + same analysis version (+ model and
+        # provider) ⇒ return the STORED result instead of re-running the LLM.
+        # This is the production source of truth — the local JSON reviewer
+        # cache is not durable across Render restarts/redeploys.
+        from app.models.models import AnalysisResultCache
+        full_scan = analysis.pull_request_id is None
+        cached_payload = None
+        cache_key = None
+        if full_scan and not settings.FORCE_GROQ_ANALYSIS:
+            try:
+                head = github_service.get_repo_object(repo.name).get_branch(repo.default_branch).commit
+                scan_commit_sha = head.sha
+                analysis.branch = repo.default_branch
+                analysis.commit_sha = scan_commit_sha
+                analysis.analysis_version = ANALYSIS_VERSION
+                db.commit()
+                cache_key = build_scan_cache_key(repo.id, scan_commit_sha, provider, model_name)
+                existing = db.query(AnalysisResultCache).filter(AnalysisResultCache.cache_key == cache_key).first()
+                if existing and existing.result_json:
+                    cached_payload = existing.result_json
+                    existing.hit_count = (existing.hit_count or 0) + 1
+                    existing.last_hit_at = datetime.now(timezone.utc)
+                    db.commit()
+                    logger.info(f"Result reuse: stored analysis found for commit {scan_commit_sha[:8]} (hits={existing.hit_count}). Reusing without LLM calls.")
+            except Exception as cache_err:
+                logger.warning(f"Result-reuse lookup failed (proceeding with a fresh scan): {cache_err}")
+                cached_payload = None
+
+        if cached_payload is not None:
+            # Materialize the completed analysis from the stored result.
+            reused_commit = analysis.commit_sha
+            _materialize_cached_result(db, analysis, cached_payload, provider, model_name)
+            db.expire(analysis)  # re-bind attributes to the session before further use
+            analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+            try:
+                from app.services.insights_orchestrator import run_all_insights as _run_insights
+                update_progress(analysis_id, 85, "Reusing stored analysis — refreshing repository insights...", status="generating_insights", db=db)
+                _run_insights(db, analysis.id, repo, github_service, commit_sha=reused_commit)
+            except Exception as insights_exc:
+                logger.error(f"Insights stage on cached scan failed (non-fatal): {insights_exc}", exc_info=True)
+            duration = time.time() - start_time
+            logger.info(f"Cached-scan materialization completed in {duration:.2f}s for analysis_id: {analysis_id}")
+            update_progress(analysis_id, 100, "Analysis completed (stored result for this exact commit was reused).", db=db)
+            db.close()
+            return f"Reused stored analysis for commit {reused_commit}"
+
+
         # Setup progress callback helper
         def progress_cb(prog, stat, msg, files_an=0, total_an=0, curr_file=""):
             update_progress(
@@ -328,6 +503,9 @@ def _run_analysis_impl(self, analysis_id: str):
             # and returned as `head_sha`; the insights stage re-uses it so the
             # health snapshot records the true snapshot SHA (no second GitHub
             # call that could race with a new push).
+            # Persist the snapshot identity on the scan row itself so every
+            # feature (explorer, reports, chat) can consistently target the
+            # same analyzed snapshot.
 
         # 4. Save results to Database
         update_progress(analysis_id, 70, "Persisting code review results...", status="generating_tests", db=db)
@@ -341,6 +519,12 @@ def _run_analysis_impl(self, analysis_id: str):
         analysis.characters_analyzed_count = results.get("characters_analyzed_count", 0)
         analysis.groq_requests_made = results.get("groq_requests_made", 0)
         analysis.cached_results_used = results.get("cached_results_used", 0)
+
+        # Snapshot identity on the scan row (authoritative single source of truth)
+        if results.get("head_sha"):
+            analysis.commit_sha = results.get("head_sha")
+            analysis.branch = results.get("branch") or analysis.branch
+            analysis.analysis_version = ANALYSIS_VERSION
 
         # Save token stats & model name
         t_stats = results.get("token_stats") or {}
@@ -491,11 +675,20 @@ def _run_analysis_impl(self, analysis_id: str):
                 # Reuse the commit SHA the scan actually analyzed (pinned at
                 # scan start) — re-resolving here could race with a new push
                 # and record a snapshot SHA that was never scanned.
-                scan_head_sha = results.get("head_sha")
+                scan_head_sha = results.get("head_sha") or analysis.commit_sha
                 insights_status = run_all_insights(db, analysis_id, repo, github_service, commit_sha=scan_head_sha)
                 logger.info(f"Repository insights completed: {insights_status}")
             except Exception as insights_exc:
                 logger.error(f"Repository insights failed (non-fatal): {insights_exc}", exc_info=True)
+
+            # ── STORE the fresh result for future deterministic reuse ──
+            try:
+                _store_result_cache(
+                    db, repo, analysis.commit_sha or results.get("head_sha"),
+                    provider, model_name, results,
+                )
+            except Exception as store_err:
+                logger.warning(f"Failed to store result cache entry (non-fatal): {store_err}")
 
         # 5. Generate and save exports
         update_progress(analysis_id, 90, "Generating export reports...", db=db)

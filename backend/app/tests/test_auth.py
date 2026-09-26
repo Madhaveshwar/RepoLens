@@ -28,16 +28,16 @@ def test_register_and_login(client):
 
 
 def test_password_hashing_and_verification():
-    from app.auth.security import get_password_hash, verify_password
+    from app.auth.security import get_password_hash_sync, verify_password_sync
     plain_password = "my_super_secret_pass_123"
-    hashed = get_password_hash(plain_password)
+    hashed = get_password_hash_sync(plain_password)
     
     assert hashed != plain_password
     assert len(hashed) > 10
     
     # Successful verification
-    assert verify_password(plain_password, hashed) is True
+    assert verify_password_sync(plain_password, hashed) is True
     
     # Failed verification (wrong password)
-    assert verify_password("wrong_password", hashed) is False
+    assert verify_password_sync("wrong_password", hashed) is False
 

@@ -191,6 +191,10 @@ class AnalysisOut(UTCTimestampMixin, BaseModel):
     total_tokens: Optional[int] = 0
     scan_duration_seconds: Optional[int] = 0
     insights: Optional[str] = None
+    # Snapshot identity: the exact repository commit this scan analyzed.
+    commit_sha: Optional[str] = None
+    branch: Optional[str] = None
+    analysis_version: Optional[str] = None
     timestamp: datetime
 
     model_config = {"from_attributes": True}

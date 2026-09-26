@@ -101,6 +101,16 @@ class Analysis(Base):
     insights = Column(Text, nullable=True)
     is_deleted = Column(Boolean, default=False, nullable=True, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
+    # ── Snapshot identity: the EXACT repository state this scan analyzed. ──
+    # Pinned once at scan start (branch HEAD resolved to a commit SHA) and
+    # reused by every feature (explorer, insights, reports, chat) so all
+    # views consistently represent the same snapshot.
+    commit_sha = Column(String, nullable=True, index=True)
+    branch = Column(String, nullable=True)
+    # Identity of the analysis configuration that produced this result.
+    # Same repository + same commit + same analysis_version ⇒ the persisted
+    # result can be reused instead of re-running the LLM.
+    analysis_version = Column(String, nullable=True, index=True)
 
     repository = relationship("Repository", back_populates="analyses")
     pull_request = relationship("PullRequest", back_populates="analyses")
@@ -396,6 +406,36 @@ class CommitAnalysis(Base):
     ai_summary = Column(Text, nullable=True)
     findings_json = Column(JSON, nullable=True, default=list)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    repository = relationship("Repository")
+
+
+class AnalysisResultCache(Base):
+    """Persistent, deterministic result-reuse store for repository scans.
+
+    Key = repository_id + commit_sha + analysis_version (+ model/provider).
+    Value = the full scan summary needed to materialize a completed Analysis
+    without calling the LLM again.
+
+    This is the production source of truth for result reuse — NOT the local
+    JSON reviewer cache, which Render instances lose on restart/redeploy.
+    """
+    __tablename__ = "analysis_result_cache"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Part of the natural key; indexed for lookup (uniqueness enforced by the
+    # cache_key hash column below).
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False, index=True)
+    commit_sha = Column(String, nullable=False, index=True)
+    analysis_version = Column(String, nullable=False, index=True)
+    # sha256(repository_id + commit_sha + analysis_version + model + provider)
+    cache_key = Column(String, nullable=False, unique=True, index=True)
+    model_name = Column(String, nullable=True)
+    provider = Column(String, nullable=True)
+    # Full stored result payload (same shape as the scan pipeline output).
+    result_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_hit_at = Column(DateTime, nullable=True)
+    hit_count = Column(Integer, default=0, nullable=True)
 
     repository = relationship("Repository")
 

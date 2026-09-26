@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
+import asyncio
 import uuid
 
 from app.database.database import get_async_db
@@ -54,8 +55,15 @@ async def list_repositories(
         perms = {"admin": False, "push": False, "pull": True}
         if github_service:
             try:
-                gh_repo = github_service.client.get_repo(r.name)
-                gh_perms = getattr(gh_repo, "permissions", None)
+                # PyGithub is synchronous — NEVER call it directly on the event
+                # loop: a slow/rate-limited GitHub response would freeze EVERY
+                # endpoint (observed live). Run off-loop with a hard timeout;
+                # on timeout/failure we keep the default permissive-less perms.
+                async def _perms():
+                    return await asyncio.to_thread(
+                        lambda: getattr(github_service.client.get_repo(r.name), "permissions", None)
+                    )
+                gh_perms = await asyncio.wait_for(_perms(), timeout=20)
                 if gh_perms:
                     perms = {
                         "admin": bool(getattr(gh_perms, "admin", False)),
@@ -104,7 +112,18 @@ async def connect_repository(
     try:
         logger.info(f"Loading details for repo: {repo_name} (token_configured: {bool(pat)})")
         github_service = GitHubService(token=pat)
-        details = github_service.get_repo_details(repo_name)
+        # Blocking PyGithub calls MUST run off the event loop (see PR sync note
+        # below); get_repo_details makes several sequential GitHub requests.
+        details = await asyncio.wait_for(
+            asyncio.to_thread(github_service.get_repo_details, repo_name),
+            timeout=45,
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"GitHub request timeout while fetching details for {repo_name}")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="GitHub did not respond in time. Please try again."
+        )
     except Exception as exc:
         logger.error(f"Failed to fetch repo details for {repo_name}: {exc}", exc_info=True)
         raise HTTPException(
@@ -128,9 +147,13 @@ async def connect_repository(
     await db.commit()
     await db.refresh(new_repo)
     
-    # Pre-sync pull requests
+    # Pre-sync pull requests (off the event loop — one lazy GitHub request
+    # PER PR attribute here previously froze the whole server)
     try:
-        prs = github_service.get_open_pull_requests(repo_name)
+        prs = await asyncio.wait_for(
+            asyncio.to_thread(github_service.get_open_pull_requests, repo_name),
+            timeout=30,
+        )
         for pr_data in prs:
             db.add(PullRequest(
                 repository_id=new_repo.id,
@@ -152,8 +175,10 @@ async def connect_repository(
     if pat:
         try:
             github_service = GitHubService(token=pat)
-            gh_repo = github_service.client.get_repo(new_repo.name)
-            gh_perms = getattr(gh_repo, "permissions", None)
+            # Off-loop GitHub call with hard timeout (see list_repositories).
+            gh_perms = await asyncio.wait_for(asyncio.to_thread(
+                lambda: getattr(github_service.client.get_repo(new_repo.name), "permissions", None)
+            ), timeout=20)
             if gh_perms:
                 perms = {
                     "admin": bool(getattr(gh_perms, "admin", False)),
@@ -196,8 +221,10 @@ async def get_repository(
     if pat:
         try:
             github_service = GitHubService(token=pat)
-            gh_repo = github_service.client.get_repo(repo.name)
-            gh_perms = getattr(gh_repo, "permissions", None)
+            # Off-loop GitHub call with hard timeout (see list_repositories).
+            gh_perms = await asyncio.wait_for(asyncio.to_thread(
+                lambda: getattr(github_service.client.get_repo(repo.name), "permissions", None)
+            ), timeout=20)
             if gh_perms:
                 perms = {
                     "admin": bool(getattr(gh_perms, "admin", False)),
@@ -254,13 +281,18 @@ async def get_scan_identity(
     if latest_scan:
         last_scan_at = latest_scan.timestamp.isoformat() if latest_scan.timestamp else None
         last_scan_id = str(latest_scan.id)
-        snap_res = await db.execute(
-            select(RepositoryHealthSnapshot)
-            .where(RepositoryHealthSnapshot.analysis_id == latest_scan.id)
-            .limit(1)
-        )
-        snapshot = snap_res.scalars().first()
-        last_scan_commit = snapshot.commit_sha if snapshot else None
+        # Preferred source: the scan row itself (analyses.commit_sha is pinned
+        # by the scan pipeline). Fall back to the health snapshot for scans
+        # recorded before the snapshot columns existed.
+        last_scan_commit = latest_scan.commit_sha
+        if not last_scan_commit:
+            snap_res = await db.execute(
+                select(RepositoryHealthSnapshot)
+                .where(RepositoryHealthSnapshot.analysis_id == latest_scan.id)
+                .limit(1)
+            )
+            snapshot = snap_res.scalars().first()
+            last_scan_commit = snapshot.commit_sha if snapshot else None
 
     # Current head on GitHub (may be unavailable — offline/PAT issues)
     current_head = None
@@ -268,9 +300,14 @@ async def get_scan_identity(
     pat = encryptor.decrypt(current_user.github_pat_encrypted) if current_user.github_pat_encrypted else settings.GITHUB_TOKEN
     if pat:
         try:
-            gh_repo = GitHubService(token=pat).client.get_repo(repo.name)
-            branch = gh_repo.default_branch or branch
-            current_head = gh_repo.get_branch(branch).commit.sha
+            # Off-loop GitHub calls with hard timeout (see list_repositories).
+            async def _head():
+                def _resolve():
+                    gh_repo = GitHubService(token=pat).client.get_repo(repo.name)
+                    br = gh_repo.default_branch or branch
+                    return br, gh_repo.get_branch(br).commit.sha
+                return await asyncio.to_thread(_resolve)
+            branch, current_head = await asyncio.wait_for(_head(), timeout=30)
         except Exception as e:
             logger.error(f"scan-identity: could not resolve current head for {repo.name}: {e}")
 
@@ -315,13 +352,26 @@ async def list_repository_prs(
     pat = encryptor.decrypt(current_user.github_pat_encrypted) if current_user.github_pat_encrypted else settings.GITHUB_TOKEN
     try:
         github_service = GitHubService(token=pat)
-        prs = github_service.get_open_pull_requests(repo.name)
+        # CRITICAL PERF FIX: PyGithub is synchronous and makes MULTIPLE API
+        # calls per PR (lazy attributes like additions/deletions trigger one
+        # request EACH). Running it on the event loop thread blocked the ENTIRE
+        # server whenever GitHub was slow — py-spy confirmed the loop frozen
+        # inside PullRequest.additions. Offload to a worker thread with a hard
+        # timeout so the loop (and /health) stay responsive.
+        try:
+            prs = await asyncio.wait_for(
+                asyncio.to_thread(github_service.get_open_pull_requests, repo.name),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"GitHub PR sync timed out for {repo.name}; serving cached DB state.")
+            prs = None
         
         db_prs_res = await db.execute(select(PullRequest).where(PullRequest.repository_id == repo.id))
         db_prs = {p.number: p for p in db_prs_res.scalars().all()}
         
         active_numbers = set()
-        for pr_data in prs:
+        for pr_data in (prs or []):
             num = pr_data.get("number", 0)
             active_numbers.add(num)
             
@@ -591,8 +641,10 @@ async def get_repository_permissions(
          
     try:
         github_service = GitHubService(token=pat)
-        gh_repo = github_service.client.get_repo(repo.name)
-        gh_perms = getattr(gh_repo, "permissions", None)
+        # Off-loop GitHub call with hard timeout (see list_repositories).
+        gh_perms = await asyncio.wait_for(asyncio.to_thread(
+            lambda: getattr(github_service.client.get_repo(repo.name), "permissions", None)
+        ), timeout=20)
         if gh_perms:
             perms = {
                 "admin": bool(getattr(gh_perms, "admin", False)),
