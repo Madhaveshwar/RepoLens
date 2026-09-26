@@ -1,8 +1,9 @@
 import React, { useState } from "react";
 import { useAuthStore } from "../store/authStore";
+import { useRepositoryStore } from "../store/repositoryStore";
 import { useThemeStore } from "../store/themeStore";
 import {
-  LayoutDashboard, FolderKanban, Settings, LogOut, HelpCircle,
+  FolderGit2, Settings, LogOut, HelpCircle,
   Shield, ChevronLeft, Sun, Moon
 } from "lucide-react";
 import { toast } from "./Toast";
@@ -14,20 +15,25 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
   const { user, logout } = useAuthStore();
+  const { setActiveRepo } = useRepositoryStore();
   const { theme, toggleTheme } = useThemeStore();
   const [collapsed, setCollapsed] = useState(false);
 
   const handleLogout = () => {
+    // Clear transient active repository state on logout
+    setActiveRepo(null);
     logout();
     toast.info("Logged out successfully.");
   };
 
   const menuItems = [
-    { id: "dashboard", name: "Dashboard", icon: LayoutDashboard },
-    { id: "repositories", name: "Repositories", icon: FolderKanban },
+    { id: "repositories", name: "Repositories", icon: FolderGit2 },
     { id: "help", name: "Help", icon: HelpCircle },
     { id: "settings", name: "Settings", icon: Settings },
   ];
+
+  // Highlight "repositories" tab when viewing repo-detail too
+  const resolvedActiveTab = activeTab === "repo-detail" ? "repositories" : activeTab;
 
   return (
     <div className={`relative ${collapsed ? 'w-20' : 'w-64'} flex-shrink-0 transition-all duration-500 ease-[cubic-bezier(0.25,0.8,0.25,1)]`}>
@@ -60,7 +66,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
         <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
           {menuItems.map((item) => {
             const Icon = item.icon;
-            const isActive = activeTab === item.id;
+            const isActive = resolvedActiveTab === item.id;
             return (
               <button
                 key={item.id}

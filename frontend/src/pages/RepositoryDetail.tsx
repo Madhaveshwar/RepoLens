@@ -583,7 +583,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
       {/* Header breadcrumb */}
       <button onClick={onBack} className="flex items-center gap-2 text-zinc-700 hover:text-zinc-950 text-xs font-semibold mb-4 transition-colors dark:text-zinc-300 dark:hover:text-white">
         <ArrowLeft className="w-4 h-4" />
-        Back to Dashboard
+        Back to Repository Selection
       </button>
 
       {/* Premium Hero Section */}
@@ -619,6 +619,18 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
             </div>
 
             <div className="flex items-center gap-3">
+              {/* NEXT → RepoLens project features (Insights) for THIS
+                  repository: analysis, security, quality, tests, dependencies,
+                  duplicates, complexity, tech debt, architecture, PR review,
+                  commits, reports and AI chat — all repository-scoped tabs. */}
+              <button
+                onClick={() => setActiveTab("insights")}
+                className="btn-secondary flex items-center gap-2"
+                title="Open project features — Insights, Deep Insights, Reports and more"
+              >
+                Next
+                <ChevronRight className="w-4 h-4" />
+              </button>
               <button
                 onClick={() => setShowDisconnectModal(true)}
                 disabled={showProgress || actionLoading}

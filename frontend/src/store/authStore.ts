@@ -1,5 +1,6 @@
-﻿import { create } from "zustand";
+import { create } from "zustand";
 import axios from "../lib/api";
+import { queryClient } from "../queryClient";
 
 interface UserProfile {
   id: string;
@@ -36,8 +37,15 @@ interface AuthState {
   logout: () => void;
 }
 
+// Restore the Authorization header immediately on page load so queries
+// fired before initialize() completes (e.g. on refresh) are authenticated.
+const _storedToken = localStorage.getItem("acr_token");
+if (_storedToken) {
+  axios.defaults.headers.common["Authorization"] = `Bearer ${_storedToken}`;
+}
+
 export const useAuthStore = create<AuthState>((set, get) => ({
-  token: localStorage.getItem("acr_token"),
+  token: _storedToken,
   user: null,
   loading: false,
   error: null,
@@ -83,6 +91,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   logout: () => {
     get().setToken(null);
     set({ user: null, justLoggedIn: false });
+    // Clear all React Query caches so the next session starts fresh.
+    // Deferred to the next tick so the authenticated tree unmounts first —
+    // clearing while pages are still mounted makes their queries refetch
+    // immediately without a token, logging 401s in the console.
+    setTimeout(() => queryClient.clear(), 0);
   }
 }));
 

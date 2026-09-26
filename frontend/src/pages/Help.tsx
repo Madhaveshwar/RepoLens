@@ -228,7 +228,7 @@ export const Help: React.FC = () => {
         {/* Tips */}
         <Section icon={Lightbulb} title="Tips for getting started">
           <ul className="space-y-2.5 text-sm text-zinc-700 dark:text-zinc-300 list-disc list-inside">
-            <li>Connect a repository from the Dashboard, then run a scan — Insights fill in automatically once the scan completes.</li>
+            <li>Connect a repository from Repository Selection, then run a scan — Insights fill in automatically once the scan completes.</li>
             <li>Start with <strong>Insights</strong> for a quick summary; open <strong>Deep Insights</strong> only when you need technical detail.</li>
             <li>Every scan records the branch and commit it analyzed, so re-running a scan on the same commit will tell you if it was already analyzed.</li>
             <li>Use the AI assistant (bottom-right) to ask questions — it answers from your real scan data when a repository is selected.</li>

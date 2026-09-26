@@ -1,7 +1,8 @@
-﻿import { create } from "zustand";
+import { create } from "zustand";
 import axios from "../lib/api";
 import { queryClient } from "../queryClient";
 import { toast } from "../components/Toast";
+import { useAnalysisStore } from "./analysisStore";
 
 export interface Repository {
   id: string;
@@ -37,10 +38,13 @@ interface RepositoryState {
   activePr: PullRequest | null;
   loading: boolean;
   error: string | null;
-  
+
   fetchRepositories: () => Promise<void>;
   connectRepository: (url: string) => Promise<Repository>;
+  /** Explicitly select a repository (user action) — resets repo-specific state. */
   setActiveRepo: (repo: Repository | null) => void;
+  /** Refresh active repository metadata (same id) without resetting state. */
+  hydrateActiveRepo: (repo: Repository) => void;
   fetchPrs: (repoId: string) => Promise<void>;
   setActivePr: (pr: PullRequest | null) => void;
   deleteRepository: (id: string) => Promise<void>;
@@ -66,7 +70,6 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
       set({ loading: false });
     }
   },
-
   connectRepository: async (url) => {
     set({ loading: true });
     try {
@@ -75,7 +78,7 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
         repositories: [...state.repositories.filter((r) => r.id !== res.data.id), res.data],
         error: null
       }));
-      // Keep the query cache consistent so remounts don't drop the new repo.
+      // Keep the query cache consistent so remounts/delete flows stay consistent.
       queryClient.setQueryData(["repositories"], (old: any) => {
         if (!Array.isArray(old)) return old;
         return [...old.filter((r: any) => r.id !== res.data.id), res.data];
@@ -91,7 +94,20 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
     }
   },
 
-  setActiveRepo: (activeRepo) => set({ activeRepo, prs: [], activePr: null }),
+  setActiveRepo: (repo) => {
+    // Reset repository-specific state on EVERY explicit selection/deselection
+    // so switching from repository A to B cannot leak findings, analyses or
+    // PRs across repositories (no cross-contamination).
+    useAnalysisStore.getState().resetAnalysisState();
+    set({ activeRepo: repo, prs: [], activePr: null });
+  },
+
+  hydrateActiveRepo: (repo) => set((state) => ({
+    // Same repository id — metadata refresh only, state intentionally kept.
+    activeRepo: state.activeRepo?.id === repo.id
+      ? { ...state.activeRepo, ...repo }
+      : state.activeRepo,
+  })),
 
   fetchPrs: async (repoId) => {
     set({ loading: true });
@@ -117,14 +133,8 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
         activeRepo: state.activeRepo?.id === id ? null : state.activeRepo,
         error: null
       }));
-      // Clear the persisted active repo if it was the one deleted, so a
-      // refresh cannot restore a deleted repository.
-      try {
-        const saved = JSON.parse(localStorage.getItem("repolens-active-repo") || "null");
-        if (saved && saved.id === id) localStorage.removeItem("repolens-active-repo");
-      } catch { /* ignore */ }
-      // ... AND sync the React Query cache, otherwise the Dashboard's
-      // "cache → store" effect resurrects the deleted repo from stale cache.
+      // ... AND sync the React Query cache, otherwise remounts may
+      // resurrect the deleted repo from stale cache.
       queryClient.setQueryData(["repositories"], (old: any) =>
         Array.isArray(old) ? old.filter((r: any) => r.id !== id) : old
       );
@@ -164,5 +174,4 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
       set({ loading: false });
     }
   }
-}));
-
+}));

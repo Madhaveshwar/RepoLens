@@ -121,6 +121,13 @@ interface AnalysisState {
   fetchRepoAnalyses: (repoId: string) => Promise<void>;
   startProgressStream: (analysisId: string) => void;
   resetProgress: () => void;
+  /**
+   * Clear ALL repository-specific analysis state (active scan, findings,
+   * smells, tests, history, progress streams). Called when the active
+   * repository changes or is deselected so data can never leak from one
+   * repository into another.
+   */
+  resetAnalysisState: () => void;
   deleteAnalysis: (analysisId: string) => Promise<void>;
   deleteAllHistory: () => Promise<void>;
   deleteRepositoryHistory: (repoId: string) => Promise<void>;
@@ -372,6 +379,26 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
       stopPolling();
       pollRetryCount = 0;
       set({ progress: 0, progressStatus: "", progressDetailed: null, error: null });
+    },
+
+    resetAnalysisState: () => {
+      // Stop any in-flight polling/WebSocket for the previous repository
+      // BEFORE clearing state, so a late poll cannot write the old repo's
+      // progress into the new repository's view.
+      stopPolling();
+      pollRetryCount = 0;
+      set({
+        analyses: [],
+        activeAnalysis: null,
+        securityFindings: [],
+        codeSmells: [],
+        testSuggestions: "",
+        healthScore: null,
+        progress: 0,
+        progressStatus: "",
+        progressDetailed: null,
+        error: null,
+      });
     },
 
     deleteAnalysis: async (analysisId) => {

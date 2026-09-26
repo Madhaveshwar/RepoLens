@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useAuthStore } from "./store/authStore";
-import { useRepositoryStore } from "./store/repositoryStore";
+import { useRepositoryStore, type Repository } from "./store/repositoryStore";
 import { useAnalysisStore } from "./store/analysisStore";
 import { Sidebar } from "./components/Sidebar";
 import { ChatBot } from "./components/ChatBot";
@@ -9,20 +9,44 @@ import { Login } from "./pages/Login";
 import { Register } from "./pages/Register";
 import { ForgotPassword } from "./pages/ForgotPassword";
 import { ResetPassword } from "./pages/ResetPassword";
-import { Dashboard } from "./pages/Dashboard";
+import { RepositorySelection } from "./pages/RepositorySelection";
 import { RepositoryDetail } from "./pages/RepositoryDetail";
 import { PRReview } from "./pages/PRReview";
 import { Settings } from "./pages/Settings";
 import { Help } from "./pages/Help";
 import { ToastContainer } from "./components/Toast";
+import { useQuery } from "@tanstack/react-query";
+import axios from "./lib/api";
 import { Loader2, Shield } from "lucide-react";
+
+// ─── Session-scoped active repository ──────────────────────────────
+// "Active repository" is an EXPLICIT, session-scoped user choice:
+//   • set only when the user clicks a repository (or connects a new one),
+//   • cleared on logout/login and never persisted to localStorage,
+//   • restored across a page refresh ONLY when the URL (#/repo/<id>)
+//     explicitly identifies it.
+// It is intentionally not persisted: a new session always starts with NO
+// active repository.
+
+/** Repository id from the URL deep link (#/repo/<id>[/<tab>]), if any. */
+function readRepoIdFromHash(): string | null {
+  const match = window.location.hash.match(/^#\/repo\/([^/?]+)/);
+  return match ? match[1] : null;
+}
+
+/** Remove a stale repository deep link from the URL. */
+function clearRepoHash() {
+  if (window.location.hash.startsWith("#/repo/")) {
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  }
+}
 
 export const App: React.FC = () => {
   const { token, user, initialize, loading, justLoggedIn, clearJustLoggedIn } = useAuthStore();
-  const { activeRepo, activePr, setActiveRepo, setActivePr } = useRepositoryStore();
+  const { activeRepo, activePr, setActiveRepo, setActivePr, hydrateActiveRepo } = useRepositoryStore();
 
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState("dashboard");
+  const [activeTab, setActiveTab] = useState("repositories");
 
   // Whether to show the landing page or auth forms
   const [showLanding, setShowLanding] = useState(true);
@@ -60,61 +84,168 @@ export const App: React.FC = () => {
   const hasGithubPat = user?.has_github_pat || false;
   const isSetupComplete = user ? (hasLlmKey && hasGithubPat) : false;
 
-  // Post-login behavior: open the Settings page first after a successful
-  // interactive login (NOT after a session restore on refresh). Once setup is
-  // complete the flag is cleared so the user isn't trapped on Settings.
+  // ─── Post-login behavior ───────────────────────────────────────────
+  // After a fresh interactive login (justLoggedIn === true):
+  //   • If credentials are missing → Settings page
+  //   • If credentials are complete → Repository Selection page
+  // In BOTH cases, the active repository is NONE until the user selects one.
+  //
+  // On a page REFRESH (justLoggedIn === false, token restored from
+  // localStorage), we do NOT auto-restore a previous active repository.
+  // The user is placed on "repositories" (Repository Selection) unless
+  // setup is incomplete.
   useEffect(() => {
     if (!user) return;
+
     if (justLoggedIn) {
-      setActiveTab("settings");
-      if (isSetupComplete) {
+      // A new session starts with NO active repository — never restore a
+      // previously selected one, and clear any stale repository URL.
+      setActiveRepo(null);
+      setActivePr(null);
+      clearRepoHash();
+
+      if (!isSetupComplete) {
+        // Credentials are missing → send to Settings first
+        setActiveTab("settings");
+      } else {
+        // Credentials OK → Repository Selection
+        setActiveTab("repositories");
         clearJustLoggedIn();
       }
-    } else if (activeTab === "settings" && isSetupComplete && !justLoggedIn) {
-      // Setup completed while on Settings — leave the user where they are;
-      // they can navigate to the Dashboard themselves.
     }
-  }, [user?.id, isSetupComplete, justLoggedIn]);
+    // Zustand setters are stable; user/isSetupComplete read intentionally.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, justLoggedIn]);
+
+  // When setup completes on the Settings page during onboarding,
+  // navigate to Repository Selection.
+  useEffect(() => {
+    if (!user || !justLoggedIn) return;
+    if (isSetupComplete) {
+      clearJustLoggedIn();
+      setActiveTab("repositories");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSetupComplete, justLoggedIn]);
+
+  // ─── Session restore & URL deep-link handling ────────────────────
+  // The URL is the ONLY thing that can restore a repository across a page
+  // refresh, because the URL explicitly identifies it (#/repo/<id>).
+  // A new session (fresh login) must NEVER restore a previous repository.
+  const [bootstrapped, setBootstrapped] = useState(false);
+  useEffect(() => {
+    if (bootstrapped) return;
+    // With a token, wait for /users/me to resolve so we know whether the
+    // session is valid before making navigation decisions.
+    if (token && (loading || !user)) return;
+    setBootstrapped(true);
+    if (!token) return;
+    if (justLoggedIn) return; // interactive login — handled by the effect above
+
+    const deepLinkRepoId = readRepoIdFromHash();
+    if (deepLinkRepoId) {
+      // Refresh/reload while viewing a repository: the URL explicitly
+      // identifies it, so restore it. A partial object is enough to render;
+      // the ownership check below hydrates it with real data (or bounces
+      // to Repository Selection if it does not belong to this user).
+      setActiveRepo({ id: deepLinkRepoId } as Repository);
+      setActiveTab("repo-detail");
+    } else {
+      // Plain refresh with no repository URL → Repository Selection.
+      setActiveRepo(null);
+      setActiveTab("repositories");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, user?.id, loading, justLoggedIn, bootstrapped]);
+
+  // Keep the URL hash aligned with the explicit repository view:
+  //   • repo-detail   → #/repo/<id> (survives refresh — the URL owns it)
+  //   • anything else → clear a stale #/repo/<id> so an old deep link can
+  //     never resurrect a repository the user has not selected this session.
+  // Gated on `bootstrapped` so the deep-link URL is NOT wiped while the
+  // session-restore effect is still waiting for /users/me to resolve.
+  useEffect(() => {
+    if (!bootstrapped || !token) return;
+    if (activeTab === "repo-detail" && activeRepo?.id) {
+      if (readRepoIdFromHash() !== activeRepo.id) {
+        window.history.replaceState(null, "", `#/repo/${activeRepo.id}`);
+      }
+    } else {
+      clearRepoHash();
+    }
+  }, [bootstrapped, token, activeTab, activeRepo?.id]);
+
+  // ─── Active repository ownership & freshness ─────────────────────
+  // Once this user's repositories are known:
+  //   • hydrate a partial repository object (URL restore) with real data;
+  //   • drop any active repository that is NOT in the user's list —
+  //     deleted/disconnected repositories, or a deep link to another
+  //     user's repository, must never expose repository-specific state.
+  const { data: reposData } = useQuery({
+    queryKey: ["repositories"],
+    queryFn: async () => {
+      const res = await axios.get("/repositories");
+      return res.data;
+    },
+    enabled: !!user && !!activeRepo,
+    staleTime: 30_000,
+    gcTime: 120_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+
+  useEffect(() => {
+    if (!Array.isArray(reposData) || !activeRepo) return;
+    const match = (reposData as Repository[]).find((r) => r.id === activeRepo.id);
+    if (!match) {
+      if (!loading) {
+        setActiveRepo(null);
+        setActivePr(null);
+        setActiveTab("repositories");
+      }
+      return;
+    }
+    // Refresh the object so the detail view shows current metadata without
+    // touching repository-specific scan state (same repository — no reset).
+    if (
+      !activeRepo.name ||
+      activeRepo.description !== match.description ||
+      activeRepo.stars !== match.stars ||
+      activeRepo.forks !== match.forks ||
+      activeRepo.open_prs_count !== match.open_prs_count ||
+      activeRepo.open_issues_count !== match.open_issues_count ||
+      activeRepo.default_branch !== match.default_branch
+    ) {
+      hydrateActiveRepo(match);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reposData, activeRepo?.id, loading]);
 
   // Safety net: if the active repository disappears (deleted/disconnected)
-  // while the detail view is open, fall back to the dashboard immediately.
+  // while the detail view is open, fall back to the repository selection.
   useEffect(() => {
-    if (activeTab === "repositories" && !activeRepo && !loading) {
-      setActiveTab("dashboard");
+    if (activeTab === "repo-detail" && !activeRepo && !loading) {
+      setActiveTab("repositories");
     }
   }, [activeTab, activeRepo, loading]);
 
-  // Restore the last viewed repository on refresh so deep-linking/refresh
-  // doesn't dump the user back on the Dashboard.
+  // Credentials changed while authenticated (saved or removed) → drop the
+  // active repository and return to Repository Selection. Never keep
+  // repository-specific state across a credentials change.
+  const prevSetupCompleteRef = useRef<boolean | null>(null);
   useEffect(() => {
-    if (!user || activeRepo) return;
-    try {
-      const saved = localStorage.getItem("repolens-active-repo");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && parsed.id && parsed.name) {
-          setActiveRepo(parsed);
-        } else {
-          localStorage.removeItem("repolens-active-repo");
-        }
-      }
-    } catch {
-      localStorage.removeItem("repolens-active-repo");
+    if (!user) {
+      prevSetupCompleteRef.current = null;
+      return;
     }
-  }, [user?.id]);
-
-  // Persist the active repository for refresh restore
-  useEffect(() => {
-    try {
-      if (activeRepo) {
-        localStorage.setItem("repolens-active-repo", JSON.stringify(activeRepo));
-      } else {
-        localStorage.removeItem("repolens-active-repo");
-      }
-    } catch {
-      // ignore persistence errors
-    }
-  }, [activeRepo]);
+    const prev = prevSetupCompleteRef.current;
+    prevSetupCompleteRef.current = Boolean(isSetupComplete);
+    if (prev === null || prev === isSetupComplete) return;
+    setActiveRepo(null);
+    setActivePr(null);
+    setActiveTab("repositories");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSetupComplete, user?.id]);
 
   if (loading) {
     return (
@@ -188,6 +319,13 @@ export const App: React.FC = () => {
     );
   }
 
+  // Explicit repository selection — the ONLY way a repository becomes active
+  // (besides a URL deep link). A selection is a user action, never inferred.
+  const handleSelectRepo = (repo: Repository) => {
+    setActiveRepo(repo);
+    setActiveTab("repo-detail");
+  };
+
   // PR review takes priority screen overlay
   if (activePr) {
     return (
@@ -201,51 +339,60 @@ export const App: React.FC = () => {
   }
 
   const renderContent = () => {
-    if (activeTab === "repositories" && activeRepo) {
+    // Repository Detail view — ONLY when the user explicitly selected (or
+    // connected) a repository this session, or the URL deep link explicitly
+    // names it. No repository can ever be "active" by default.
+    if (activeTab === "repo-detail" && activeRepo) {
       return (
         <RepositoryDetail
           onBack={() => {
+            // Back = explicit deselect. The URL is cleared too, so a refresh
+            // lands on Repository Selection, not on the deselected repository.
             setActiveRepo(null);
-            // Land on the repository list after closing a repo detail view
-            // (also covers the delete/disconnect flow, which clears activeRepo).
-            setActiveTab("dashboard");
+            setActiveTab("repositories");
           }}
           onSelectPr={(pr) => setActivePr(pr)}
         />
       );
     }
+    // Guard: repo-detail without an explicitly selected repository is not
+    // reachable — Repository Selection is the only authenticated landing.
+    if (activeTab === "repo-detail" && !activeRepo) {
+      return (
+        <RepositorySelection
+          onSelectRepo={handleSelectRepo}
+          onNavigateToSettings={() => setActiveTab("settings")}
+        />
+      );
+    }
 
     switch (activeTab) {
-      case "dashboard":
-        return <Dashboard onSelectRepoId={async (id) => {
-          const { repositories, setActiveRepo } = useRepositoryStore.getState();
-          const target = repositories.find(r => r.id === id);
-          if (target) {
-            setActiveRepo(target);
-            setActiveTab("repositories");
-          }
-        }} />;
       case "repositories":
-        return <Dashboard onSelectRepoId={async (id) => {
-          const { repositories, setActiveRepo } = useRepositoryStore.getState();
-          const target = repositories.find(r => r.id === id);
-          if (target) {
-            setActiveRepo(target);
-          }
-        }} />;
+        return (
+          <RepositorySelection
+            onSelectRepo={handleSelectRepo}
+            onNavigateToSettings={() => setActiveTab("settings")}
+          />
+        );
       case "settings":
         return <Settings />;
       case "help":
         return <Help />;
       default:
-        return <Dashboard onSelectRepoId={() => {}} />;
+        return (
+          <RepositorySelection
+            onSelectRepo={handleSelectRepo}
+            onNavigateToSettings={() => setActiveTab("settings")}
+          />
+        );
     }
   };
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       <Sidebar activeTab={activeTab} setActiveTab={(tab) => {
-        if (tab !== "repositories") {
+        if (tab !== "repo-detail") {
+          // Navigating away from a repository view deselects it explicitly.
           setActiveRepo(null);
         }
         setActiveTab(tab);
@@ -261,8 +408,8 @@ export const App: React.FC = () => {
         findingContext={(() => {
           const { activeAnalysis, securityFindings, codeSmells } = useAnalysisStore.getState();
           const { activeRepo } = useRepositoryStore.getState();
-          
-          if (activeTab === "repositories" && activeRepo && activeAnalysis) {
+
+          if (activeTab === "repo-detail" && activeRepo && activeAnalysis) {
             return {
               type: "repository_scan",
               repository: activeRepo.name,
@@ -286,12 +433,6 @@ export const App: React.FC = () => {
             };
           }
           
-          if (activeTab === "dashboard") {
-            return {
-              type: "dashboard",
-              active_repository: activeRepo?.name || null,
-            };
-          }
 
           if (activeTab === "settings") {
             return {
