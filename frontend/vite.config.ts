@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "https://repolens-8y8r.onrender.com",
+        target: "https://repolens-ft5r.onrender.com",
         changeOrigin: true,
         secure: true,
         configure: (proxy) => {

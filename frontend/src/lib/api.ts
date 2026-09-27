@@ -1,7 +1,7 @@
 import axios from "axios";
 
 const configuredBaseUrl = import.meta.env.VITE_API_URL as string | undefined;
-const productionBaseUrl = configuredBaseUrl || "https://repolens-8y8r.onrender.com";
+const productionBaseUrl = configuredBaseUrl || "https://repolens-ft5r.onrender.com";
 
 export const API_BASE_URL = (import.meta.env.DEV ? "" : productionBaseUrl).replace(/\/+$/, "");
 export const API_V1_BASE_URL = `${API_BASE_URL}/api/v1`;
