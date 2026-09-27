@@ -1,6 +1,6 @@
 ﻿import React, { useState } from "react";
 import axios from "../lib/api";
-import { Shield, Mail, Lock, Loader2, Eye, EyeOff } from "lucide-react";
+import { Shield, Mail, Lock, Eye, EyeOff } from "lucide-react";
 import { toast } from "../components/Toast";
 
 interface RegisterProps {
@@ -51,7 +51,7 @@ export const Register: React.FC<RegisterProps> = ({ onNavigateToLogin }) => {
       }, 2000);
     } catch (err: any) {
       if (!err.response) {
-        setError("Cannot reach the RepoLens AI server. Make sure the backend is running on port 8000, then try again.");
+        setError("Unable to reach the configured RepoLens AI API. Check the connection and try again.");
       } else {
         const msg = err.response?.data?.detail || "Registration failed. Try again.";
         setError(msg);
@@ -156,10 +156,12 @@ export const Register: React.FC<RegisterProps> = ({ onNavigateToLogin }) => {
             </label>
           </div>
 
-          <button type="submit" disabled={loading || success}
-            className="btn-primary w-full flex items-center justify-center gap-2"
+          <button
+            type="submit"
+            disabled={loading || success}
+            className="btn-primary w-full justify-center disabled:cursor-not-allowed disabled:opacity-70"
           >
-            {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> Creating account...</> : "Sign Up"}
+            {loading ? "Creating account..." : success ? "Account created" : "Create account"}
           </button>
 
           {loading && (

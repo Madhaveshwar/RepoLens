@@ -42,7 +42,7 @@ export const Login: React.FC<LoginProps> = ({ onNavigateToRegister, onNavigateTo
     } catch (err: any) {
       if (!err.response) {
         // Network/CORS failure — the backend is unreachable, not a bad password.
-        setError("Cannot reach the RepoLens AI server. Make sure the backend is running on port 8000, then try again.");
+        setError("Unable to reach the configured RepoLens AI API. Check the connection and try again.");
       } else {
         const msg = err.response?.data?.detail || "Invalid email or password";
         setError(msg);

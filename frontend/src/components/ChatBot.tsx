@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Markdown } from "./Markdown";
+import { API_V1_BASE_URL } from "../lib/api";
 import {
   MessageSquare, X, Send, Bot,
   User, GraduationCap,
@@ -145,7 +146,6 @@ export const ChatBot: React.FC<ChatProps> = ({ currentPage, findingContext }) =>
       .slice(-10)
       .map(m => ({ role: m.role, content: m.content }));
 
-    const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/+$/, "");
     const token = localStorage.getItem("acr_token");
 
     const controller = new AbortController();
@@ -156,7 +156,7 @@ export const ChatBot: React.FC<ChatProps> = ({ currentPage, findingContext }) =>
     };
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/v1/chat/ask/stream`, {
+      const response = await fetch(`${API_V1_BASE_URL}/chat/ask/stream`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

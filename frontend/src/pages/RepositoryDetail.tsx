@@ -171,7 +171,7 @@ const ScanRequiredEmptyState: React.FC<{ icon?: React.ReactNode; message?: strin
 export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSelectPr }) => {
   const { activeRepo, prs } = useRepositoryStore();
   const { user } = useAuthStore();
-  const hasLlmKey = user ? (
+  const hasLlmKey = user ? Boolean(
     user.has_groq_api_key || user.has_openai_api_key ||
     user.has_claude_api_key || user.has_gemini_api_key || user.has_openrouter_api_key
   ) : false;

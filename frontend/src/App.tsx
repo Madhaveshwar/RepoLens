@@ -375,7 +375,15 @@ export const App: React.FC = () => {
           />
         );
       case "settings":
-        return <Settings />;
+        return (
+          <Settings
+            onSaved={() => {
+              // Credentials saved → continue the repository-first flow.
+              clearJustLoggedIn();
+              setActiveTab("repositories");
+            }}
+          />
+        );
       case "help":
         return <Help />;
       default:

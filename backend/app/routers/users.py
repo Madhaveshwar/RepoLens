@@ -4,6 +4,7 @@ from sqlalchemy import select, func
 from typing import List, Dict, Any
 import datetime
 import logging
+import re
 import httpx
 
 from app.database.database import get_async_db
@@ -179,6 +180,52 @@ async def test_llm_api(provider: str, api_key: str) -> str:
         return f"Error: {str(e)}"
 
 
+# ── Safe error message helpers ──────────────────────────────────────────────
+# Validation failures are surfaced to the UI as toast text. Provider checkers
+# can return raw exception strings (e.g. "Error: 400, message='...<svg ...'")
+# which must never reach the client: they can contain markup, control chars,
+# or other unsafe content. Everything is flattened to a short plain-text,
+# provider-only reason — keys and request details are never included.
+
+# Allowed characters for a validation reason: letters, digits and basic
+# punctuation. Everything else (markup, tags, control characters) is dropped.
+_REASON_ALLOWED = re.compile(r"[^A-Za-z0-9 .:,()/'+-]+").sub
+
+
+def _sanitize_reason_text(text: str, max_len: int = 120) -> str:
+    """Flatten arbitrary text to one safe, single-line plain-text snippet."""
+    flat = " ".join(str(text).split())            # strip newlines/tabs/multiple spaces
+    flat = _REASON_ALLOWED("", flat)              # drop any non-plain-text chars
+    return flat[:max_len]
+
+
+def _safe_validation_reason(api_result: str) -> str:
+    """Convert a provider checker result into a safe plain-text reason.
+
+    Well-known statuses pass through; anything else (e.g. "Error: ..." with a
+    raw exception string) is mapped to a curated plain-text explanation. Raw
+    exception content is NEVER forwarded: it can contain markup, URLs, keys,
+    or other unsafe fragments. The one useful piece of information — the HTTP
+    status — is kept after sanitization.
+    """
+    known = {"Connected", "Invalid Key", "Missing Key", "Timeout", "Unknown"}
+    if api_result in known:
+        return api_result
+    if api_result.startswith("Error (HTTP"):
+        return _sanitize_reason_text(api_result)
+    # Any other failure ("Error: <raw exception>", unknown shapes) → a fixed,
+    # safe explanation. No raw exception content ever reaches the client.
+    return "Provider could not be reached - check your connection and try again."
+
+
+def _sanitize_error_detail(text: str, max_len: int = 1500) -> str:
+    """Sanitize a multi-line error detail while PRESERVING the line structure
+    (the UI renders one provider reason per line). Each line is flattened to
+    safe plain text; total length is capped."""
+    lines = [_sanitize_reason_text(line, max_len=300) for line in str(text).split("\n")]
+    return "\n".join(lines)[:max_len]
+
+
 @router.get("/me", response_model=UserOut)
 async def get_me(current_user: User = Depends(get_current_user)):
     return UserOut(
@@ -228,10 +275,19 @@ async def update_credentials(
 
     validation_errors = []
     for field_name, provider_name, raw_key in key_validations:
-        if provider_name == "github":
-            api_result = await test_github_api(raw_key)
-        else:
-            api_result = await test_llm_api(provider_name, raw_key)
+        try:
+            if provider_name == "github":
+                api_result = await test_github_api(raw_key)
+            else:
+                api_result = await test_llm_api(provider_name, raw_key)
+        except Exception:
+            # A crashing provider check must become a clean 400 with a safe
+            # reason — never an unhandled 500. No exception content is kept.
+            logger.warning(
+                "Provider validation raised for user_id=%s provider=%s",
+                current_user.id, provider_name,
+            )
+            api_result = "Error: provider validation failed"
         if api_result != "Connected":
             friendly_name = {
                 "github_pat": "GitHub PAT",
@@ -241,14 +297,33 @@ async def update_credentials(
                 "gemini_api_key": "Gemini API Key",
                 "openrouter_api_key": "OpenRouter API Key",
             }.get(field_name, field_name)
-            validation_errors.append(f"{friendly_name}: {api_result}")
+            validation_errors.append(
+                f"{friendly_name}: {_safe_validation_reason(api_result)}"
+            )
+
+    has_preference_update = any(
+        value is not None
+        for value in (
+            creds.llm_default_provider,
+            creds.llm_default_model,
+            creds.llm_temperature,
+            creds.llm_max_tokens,
+        )
+    )
+    if not key_validations and not has_preference_update:
+        # Nothing to validate and nothing to persist — reject instead of
+        # silently returning 200 (defense in depth; the UI also checks this).
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Enter at least one credential to save.",
+        )
 
     if validation_errors:
         error_detail = "The following API keys failed validation:\n" + "\n".join(validation_errors)
         logger.warning(f"Key validation failed for user_id={current_user.id}: {validation_errors}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error_detail
+            detail=_sanitize_error_detail(error_detail),
         )
 
     # ── All keys passed validation — save them ──

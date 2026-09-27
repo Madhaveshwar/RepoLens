@@ -4,10 +4,8 @@ import axios from "../lib/api";
 import { useAuthStore } from "../store/authStore";
 import {
   Key, Github, CheckCircle2, AlertTriangle, Loader2,
-  Eye, EyeOff, Brain, Shield, Rocket, X, Trash2, Sparkles, Cpu, Zap, Globe,
-  Sun, Moon
+  Eye, EyeOff, Brain, Shield, Rocket, X, Trash2, Sparkles, Cpu, Zap, Globe, Sun
 } from "lucide-react";
-import { useThemeStore } from "../store/themeStore";
 
 // ── Types ──
 
@@ -126,7 +124,7 @@ const ToastContainer: React.FC<{ toasts: Toast[]; onDismiss: (id: number) => voi
             ? <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5" />
             : <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
           }
-          <p className="text-sm font-medium flex-1">{t.message}</p>
+          <p className="text-sm font-medium flex-1 whitespace-pre-line break-words">{t.message}</p>
           <button onClick={() => onDismiss(t.id)} className="shrink-0 bg-transparent border-0 cursor-pointer p-0.5 hover:opacity-70 transition-opacity">
             <X className="w-4 h-4" />
           </button>
@@ -138,14 +136,19 @@ const ToastContainer: React.FC<{ toasts: Toast[]; onDismiss: (id: number) => voi
 
 // ── Settings ──
 
-export const Settings: React.FC = () => {
+interface SettingsProps {
+  /** Called after credentials are saved successfully (navigates to Repository Selection). */
+  onSaved?: () => void;
+}
+
+export const Settings: React.FC<SettingsProps> = ({ onSaved }) => {
   const { user, initialize } = useAuthStore();
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const addToast = useCallback((type: ToastType, message: string) => {
+  const addToast = useCallback((type: ToastType, message: string, durationMs = 5000) => {
     const id = ++toastIdCounter;
     setToasts((prev) => [...prev, { id, type, message }]);
-    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 5000);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), durationMs);
   }, []);
 
   const dismissToast = useCallback((id: number) => {
@@ -213,11 +216,19 @@ export const Settings: React.FC = () => {
       setFormKeys({ ...EMPTY_FORM_KEYS });
       await initialize();
       await fetchDiagnostics();
+      // Repository-first flow: a successful save continues to Repository
+      // Selection. No repository is opened automatically.
+      onSaved?.();
     } catch (err: any) {
-      const detail = err.response?.data?.detail || "Failed to save credentials.";
-      // Extract first line for a concise toast
-      const firstLine = detail.split("\n")[0].trim();
-      addToast("error", firstLine);
+      // Surface the full validation failure — one provider reason per line —
+      // so the user can see WHICH key failed and why. Guard against non-string
+      // details (FastAPI sends a string; never render anything else).
+      const raw = err.response?.data?.detail;
+      const detail =
+        typeof raw === "string" && raw.trim()
+          ? raw.trim()
+          : "Failed to save credentials. Please check your keys and try again.";
+      addToast("error", detail, 10000);
     } finally {
       setSaving(false);
     }
@@ -247,8 +258,6 @@ export const Settings: React.FC = () => {
     user.has_claude_api_key || user.has_gemini_api_key || user.has_openrouter_api_key
   ) : false;
 
-  const { theme, setTheme } = useThemeStore();
-
   return (
     <div className="flex-1 p-8 overflow-y-auto max-h-screen">
       <div className="max-w-2xl mx-auto">
@@ -260,7 +269,7 @@ export const Settings: React.FC = () => {
         {/* Onboarding */}
         {!hasLlmKey && user && (
           <motion.div
-            className="mb-8 bg-gradient-to-br from-violet-50 to-blue-50 border border-violet-200/60 rounded-3xl p-8 shadow-sm relative overflow-hidden"
+            className="mb-8 bg-gradient-to-br from-violet-50 to-blue-50 dark:from-violet-950/60 dark:to-blue-950/60 border border-violet-200/60 dark:border-violet-800/60 rounded-3xl p-8 shadow-sm relative overflow-hidden"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
           >
@@ -271,12 +280,13 @@ export const Settings: React.FC = () => {
                   <Rocket className="w-6 h-6 text-zinc-900" />
                 </div>
                 <div>
-                  <h2 className="text-2xl font-bold text-zinc-900">Welcome to RepoLens AI</h2>
-                  <p className="text-base text-zinc-700 mt-0.5">Configure an AI provider to get started</p>
+                  <h2 className="text-2xl font-bold text-zinc-900 dark:text-white">Welcome to RepoLens AI</h2>
+                  <p className="text-base text-zinc-700 dark:text-zinc-200 mt-0.5">Configure an AI provider to get started</p>
                 </div>
               </div>
               <div className="mt-4 bg-white/50 backdrop-blur-sm border border-violet-200/30 rounded-2xl p-4 flex items-start gap-3">
-                <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />                  <p className="text-xs text-zinc-800 font-medium leading-relaxed">
+                <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-xs text-zinc-800 dark:text-zinc-100 font-medium leading-relaxed">
                   Add at least one LLM API key below (<strong>Groq</strong>, <strong>OpenAI</strong>, <strong>Claude</strong>, <strong>Gemini</strong>, or <strong>OpenRouter</strong>) to run code reviews and scan repositories.
                   Your key is encrypted with AES-256 before storage.
                 </p>
@@ -363,11 +373,11 @@ export const Settings: React.FC = () => {
           )}
         </div>
 
-        {/* Appearance — Light/Dark theme */}
+        {/* Appearance settings remain available from the sidebar theme control. */}
         <div className="glass-card p-6 mb-8">
           <div className="flex items-center gap-3 mb-5 border-b border-border/40 pb-4">
             <div className="w-10 h-10 rounded-2xl bg-blue-50 flex items-center justify-center">
-              {theme === "dark" ? <Moon className="w-5 h-5 text-accent-blue" /> : <Sun className="w-5 h-5 text-accent-blue" />}
+              <Sun className="w-5 h-5 text-accent-blue" />
             </div>
             <div>
               <h3 className="font-bold text-zinc-950">Appearance</h3>
@@ -381,26 +391,9 @@ export const Settings: React.FC = () => {
                 Follows your system preference until you pick one. Your choice is remembered.
               </p>
             </div>
-            <div className="flex gap-1 bg-zinc-100 rounded-2xl p-1 dark:bg-zinc-800">
-              <button
-                type="button"
-                onClick={() => setTheme("light")}
-                className={`flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl transition-all ${
-                  theme === "light" ? "bg-white text-accent-blue shadow-sm dark:bg-zinc-950 dark:text-white" : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-white"
-                }`}
-              >
-                <Sun className="w-3.5 h-3.5" /> Light
-              </button>
-              <button
-                type="button"
-                onClick={() => setTheme("dark")}
-                className={`flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl transition-all ${
-                  theme === "dark" ? "bg-zinc-900 text-white shadow-sm dark:bg-white dark:text-zinc-900" : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-white"
-                }`}
-              >
-                <Moon className="w-3.5 h-3.5" /> Dark
-              </button>
-            </div>
+            <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+              Use the appearance control in the sidebar to change the theme.
+            </p>
           </div>
         </div>
 
@@ -433,12 +426,10 @@ export const Settings: React.FC = () => {
                       type={showKeys[provider.key] ? "text" : "password"}
                       placeholder={hasKey ? "Leave blank to keep current key" : provider.placeholder}
                       value={formKeys[provider.key]}
-                      onChange={(e) => setFormKeys((prev) => ({ ...prev, [provider.key]: e.target.value }))}
                       aria-label={provider.label}
                       className="input-glass text-sm pr-10"
                     />
                     <button
-                      type="button"
                       onClick={() => toggleShowKey(provider.key)}
                       aria-label={showKeys[provider.key] ? `Hide ${provider.label} value` : `Show ${provider.label} value`}
                       className="absolute inset-y-0 right-0 pr-3 flex items-center text-zinc-400 hover:text-zinc-700 bg-transparent border-0 cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue rounded"

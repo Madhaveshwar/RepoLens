@@ -11,6 +11,8 @@
 :root {
   /* Light theme — white page, white cards, dark text, visible borders */
   --rl-bg: 250 250 250;              /* page background (#FAFAFA) */
+  --rl-foreground: 39 39 42;         /* default text (#27272A) */
+  --rl-foreground-strong: 17 17 19;  /* headings (#111113) */
   --rl-bg-elevated: #F3F4F6;
   --rl-bg-raised: #EEF0F3;
   --rl-surface: #FFFFFF;
@@ -43,6 +45,8 @@
 html.dark {
   /* Dark theme — very dark page, lighter dark cards, white text */
   --rl-bg: 11 12 15;                 /* #0B0C0F page background */
+  --rl-foreground: 228 228 231;      /* default text (#E4E4E7) */
+  --rl-foreground-strong: 250 250 250; /* headings (#FAFAFA) */
   --rl-bg-elevated: #131418;
   --rl-bg-raised: #17181C;
   --rl-surface: #18181B;
@@ -82,7 +86,7 @@ html.dark {
 
   body {
     background-color: rgb(var(--rl-bg));
-    color: #18181B;
+    color: rgb(var(--rl-foreground));
     @apply antialiased font-sans selection:bg-accent-blue/20 selection:text-accent-blue;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
     transition: background-color 0.2s ease;
@@ -91,7 +95,7 @@ html.dark {
   /* All headings — dark in light mode (never faint) */
   h1, h2, h3, h4 {
     @apply font-sans tracking-tight font-bold;
-    color: #111113;
+    color: rgb(var(--rl-foreground-strong));
   }
 
   h1 { @apply text-4xl md:text-5xl; }
@@ -102,12 +106,12 @@ html.dark {
   /* Body text base size + dark enough on white */
   p {
     @apply text-base;
-    color: #27272A;
+    color: rgb(var(--rl-foreground));
   }
 
   /* Strong base text color across the app (readability pass) */
   main, main span, main p, main li, main td, main th, main label {
-    color: #27272A;
+    color: rgb(var(--rl-foreground));
   }
 
   /* Interactive element transitions */
@@ -433,7 +437,8 @@ html.dark .bg-white\/\[0\.03\] { background-color: rgba(39, 39, 42, 0.35); }
 
 /* Text colors — zinc scale flips for readability */
 html.dark .text-zinc-950, html.dark .text-zinc-900 { color: #F4F4F5; }
-html.dark .text-zinc-800, html.dark .text-zinc-700, html.dark .text-zinc-600 { color: #D4D4D8; }
+html.dark .text-zinc-800, html.dark .text-zinc-700, html.dark .text-zinc-600,
+html.dark .text-zinc-300, html.dark .text-zinc-200 { color: #D4D4D8; }
 html.dark .text-zinc-500 { color: #A1A1AA; }
 html.dark .text-zinc-400 { color: #8E8E98; }
 

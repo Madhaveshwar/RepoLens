@@ -1,14 +1,11 @@
-import React, { useState, useRef, useEffect, Suspense, lazy } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { motion, useInView, AnimatePresence } from "framer-motion";
 import {
   Shield, ArrowRight, CheckCircle2, Star, Github, Code2,
-  ShieldCheck, Zap, BarChart3, GitPullRequest, Sparkles, ChevronDown,
-  Menu, X, Mail, Linkedin, Twitter,
+  ShieldCheck, Zap, BarChart3, GitPullRequest, ChevronDown,
+  Mail, Linkedin, Twitter,
   Bot, Lock, Wrench
 } from "lucide-react";
-
-// Lazy-load the 3D scene for perf
-const ThreeDHero = lazy(() => import("../components/ThreeDHero"));
 
 interface LandingProps {
   onNavigateToLogin: () => void;
@@ -162,109 +159,45 @@ const PRICING_PLANS = [
 ];
 
 export const Landing: React.FC<LandingProps> = ({ onNavigateToLogin, onNavigateToRegister }) => {
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [openFaq, setOpenFaq] = useState<number | null>(null);
 
   // [REMOVED] scrollYProgress — parallax effects removed with 3D hero integration
 
   const scrollTo = (id: string) => {
-    setMobileMenuOpen(false);
     const el = document.getElementById(id);
     if (el) el.scrollIntoView({ behavior: "smooth" });
   };
 
   return (
     <div className="min-h-screen bg-background text-zinc-900 overflow-x-hidden">
-      {/* ── Navigation ── */}
-      <motion.nav
-        className="fixed top-0 left-0 right-0 z-50 bg-white/80 backdrop-blur-glass border-b border-zinc-200/40"
-        initial={{ y: -20, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
-        transition={{ duration: 0.4, ease: "easeOut" }}
-      >
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <motion.div className="flex items-center gap-3" whileHover={{ scale: 1.02 }}>
-            <div className="w-9 h-9 rounded-2xl bg-accent-gradient flex items-center justify-center shadow-glow-blue">
-              <Shield className="w-5 h-5 text-white" />
+      <nav className="fixed inset-x-0 top-0 z-50">
+        <div className="mx-auto max-w-6xl px-6 pt-5">
+          <div className="flex items-center justify-between rounded-full border border-zinc-200/80 bg-white/80 px-4 py-3 shadow-glass backdrop-blur-xl">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-accent-gradient flex items-center justify-center shadow-glow-blue">
+                <Shield className="w-4 h-4 text-white" />
+              </div>
+              <span className="text-sm font-bold text-zinc-900">RepoLens AI</span>
             </div>
-            <span className="font-bold text-sm font-sans text-zinc-950">RepoLens AI</span>
-          </motion.div>
-
-          <div className="hidden md:flex items-center gap-8">
-            {["features", "workflow", "pricing", "faq"].map((item) => (
-              <motion.button
-                key={item}
-                onClick={() => scrollTo(item)}
-                className="text-xs text-zinc-600 hover:text-zinc-900 font-medium transition-colors"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                {item === "workflow" ? "How it Works" : item.charAt(0).toUpperCase() + item.slice(1)}
-              </motion.button>
-            ))}
-            <div className="flex items-center gap-3 pl-4 border-l border-border/40">
-              <button onClick={onNavigateToLogin} className="btn-secondary text-xs">Sign In</button>
-              <motion.button
-                onClick={onNavigateToRegister}
-                className="btn-primary text-xs flex items-center gap-1.5"
-                whileHover={{ scale: 1.03 }}
-                whileTap={{ scale: 0.97 }}
-              >
-                Start Reviewing <Sparkles className="w-3 h-3" />
-              </motion.button>
+            <div className="hidden md:flex items-center gap-2 text-xs font-semibold text-zinc-700">
+              <button onClick={() => scrollTo("features")} className="px-3 py-2 rounded-full hover:bg-zinc-100 transition-colors">Features</button>
+              <button onClick={() => scrollTo("workflow")} className="px-3 py-2 rounded-full hover:bg-zinc-100 transition-colors">How it Works</button>
+              <button onClick={() => scrollTo("pricing")} className="px-3 py-2 rounded-full hover:bg-zinc-100 transition-colors">Pricing</button>
+              <button onClick={() => scrollTo("faq")} className="px-3 py-2 rounded-full hover:bg-zinc-100 transition-colors">FAQ</button>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={onNavigateToLogin} className="btn-secondary text-xs px-4 py-2">Sign In</button>
+              <button onClick={onNavigateToRegister} className="btn-primary text-xs px-4 py-2">Start Reviewing</button>
             </div>
           </div>
-
-          <button
-            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="md:hidden text-muted hover:text-zinc-950 p-2 dark:hover:text-white"
-            aria-label="Toggle mobile menu"
-          >
-            {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
         </div>
+      </nav>
 
-        <AnimatePresence>
-          {mobileMenuOpen && (
-            <motion.div
-              className="md:hidden glass border-t border-border/40 p-4 space-y-3"
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.3, ease: "easeInOut" }}
-            >
-              {["features", "workflow", "pricing", "faq"].map((item) => (
-                <button key={item} onClick={() => scrollTo(item)}
-                  className="block w-full text-left text-sm text-muted hover:text-zinc-950 py-2 dark:hover:text-white">
-                  {item === "workflow" ? "How it Works" : item.charAt(0).toUpperCase() + item.slice(1)}
-                </button>
-              ))}
-              <div className="flex gap-3 pt-2 border-t border-border/40">
-                <button onClick={onNavigateToLogin} className="btn-secondary flex-1 text-xs">Sign In</button>
-                <button onClick={onNavigateToRegister} className="btn-primary flex-1 text-xs">Start Reviewing</button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </motion.nav>
-
-      {/* ── Hero Section (with 3D background) ── */}
       <section className="relative pt-32 pb-24 overflow-hidden min-h-[90vh] flex items-center">
         <div className="absolute inset-0 bg-hero-gradient pointer-events-none" />
         
-        {/* Premium 3D Scene */}
-        <Suspense fallback={
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="w-16 h-16 rounded-3xl bg-accent-gradient flex items-center justify-center animate-pulse">
-              <Shield className="w-8 h-8 text-white" />
-            </div>
-          </div>
-        }>
-          <ThreeDHero />
-        </Suspense>
-
         <motion.div
-          className="relative max-w-5xl mx-auto px-6 text-center"
+          className="relative w-full min-w-0 max-w-5xl mx-auto px-6 text-center"
           initial={{ opacity: 0, y: 40 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.7, ease: [0.25, 0.4, 0.25, 1] }}
@@ -296,6 +229,33 @@ export const Landing: React.FC<LandingProps> = ({ onNavigateToLogin, onNavigateT
             </motion.span>
           </motion.h1>
 
+          <motion.div
+            className="mx-auto mb-10 max-w-3xl overflow-hidden rounded-[2rem] border border-zinc-200/80 bg-white/80 p-4 shadow-glass backdrop-blur-sm"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.45, duration: 0.5 }}
+          >
+            <div className="rounded-[1.5rem] bg-gradient-to-r from-accent-blue/10 via-violet-500/10 to-accent-cyan/10 p-5 md:p-8">
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="rounded-2xl bg-white/70 p-4 text-left shadow-sm">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">Coverage</p>
+                  <p className="mt-2 text-2xl font-bold text-zinc-950">10K+</p>
+                  <p className="text-xs text-zinc-600">Repository scans</p>
+                </div>
+                <div className="rounded-2xl bg-white/70 p-4 text-left shadow-sm">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">Findings</p>
+                  <p className="mt-2 text-2xl font-bold text-zinc-950">50K+</p>
+                  <p className="text-xs text-zinc-600">Security insights</p>
+                </div>
+                <div className="rounded-2xl bg-white/70 p-4 text-left shadow-sm">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">Latency</p>
+                  <p className="mt-2 text-2xl font-bold text-zinc-950">&lt;3m</p>
+                  <p className="text-xs text-zinc-600">Median review time</p>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+
           <motion.p
             className="text-lg text-zinc-700 max-w-2xl mx-auto mb-10"
             initial={{ opacity: 0, y: 20 }}
@@ -319,6 +279,14 @@ export const Landing: React.FC<LandingProps> = ({ onNavigateToLogin, onNavigateT
               whileTap={{ scale: 0.97 }}
             >
               Start Reviewing <ArrowRight className="w-4 h-4" />
+            </motion.button>
+            <motion.button
+              onClick={onNavigateToLogin}
+              className="btn-secondary text-sm px-8 py-4"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.97 }}
+            >
+              Sign In
             </motion.button>
             <motion.button
               onClick={() => scrollTo("workflow")}

@@ -16,7 +16,8 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
   const { user, logout } = useAuthStore();
   const { setActiveRepo } = useRepositoryStore();
-  const { theme, toggleTheme } = useThemeStore();
+  const theme = useThemeStore((state) => state.theme);
+  const toggleTheme = useThemeStore((state) => state.toggleTheme);
   const [collapsed, setCollapsed] = useState(false);
 
   const handleLogout = () => {
@@ -93,21 +94,23 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
           })}
         </nav>
 
-        {/* Appearance: Light/Dark toggle */}
         <div className="px-3 pb-1">
+          {!collapsed && (
+            <p className="text-[9px] font-bold uppercase tracking-wider text-zinc-400 px-1 pb-1">
+              Appearance
+            </p>
+          )}
           <button
+            type="button"
             onClick={toggleTheme}
+            className="w-full flex items-center justify-between rounded-2xl border border-zinc-200/60 bg-zinc-50 px-3 py-2.5 text-left transition-colors hover:bg-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
             aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-            aria-pressed={theme === "dark"}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all duration-300 text-zinc-700 hover:text-zinc-950 hover:bg-zinc-100 border border-transparent hover:scale-[1.02] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue ${collapsed ? 'justify-center' : ''}`}
-            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           >
-            {theme === "dark" ? <Sun className="w-4.5 h-4.5 flex-shrink-0" aria-hidden="true" /> : <Moon className="w-4.5 h-4.5 flex-shrink-0" aria-hidden="true" />}
-            {!collapsed && (
-              <span className="text-xs font-bold truncate">
-                {theme === "dark" ? "Light Mode" : "Dark Mode"}
-              </span>
-            )}
+            <span className="flex items-center gap-2 text-xs font-bold text-zinc-700">
+              {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              {!collapsed && (theme === "dark" ? "Light mode" : "Dark mode")}
+            </span>
+            {!collapsed && <span className="text-[10px] uppercase tracking-wider text-zinc-500">Toggle</span>}
           </button>
         </div>
 
