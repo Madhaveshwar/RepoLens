@@ -229,33 +229,6 @@ export const Landing: React.FC<LandingProps> = ({ onNavigateToLogin, onNavigateT
             </motion.span>
           </motion.h1>
 
-          <motion.div
-            className="mx-auto mb-10 max-w-3xl overflow-hidden rounded-[2rem] border border-zinc-200/80 bg-white/80 p-4 shadow-glass backdrop-blur-sm"
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.45, duration: 0.5 }}
-          >
-            <div className="rounded-[1.5rem] bg-gradient-to-r from-accent-blue/10 via-violet-500/10 to-accent-cyan/10 p-5 md:p-8">
-              <div className="grid gap-4 md:grid-cols-3">
-                <div className="rounded-2xl bg-white/70 p-4 text-left shadow-sm">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">Coverage</p>
-                  <p className="mt-2 text-2xl font-bold text-zinc-950">10K+</p>
-                  <p className="text-xs text-zinc-600">Repository scans</p>
-                </div>
-                <div className="rounded-2xl bg-white/70 p-4 text-left shadow-sm">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">Findings</p>
-                  <p className="mt-2 text-2xl font-bold text-zinc-950">50K+</p>
-                  <p className="text-xs text-zinc-600">Security insights</p>
-                </div>
-                <div className="rounded-2xl bg-white/70 p-4 text-left shadow-sm">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">Latency</p>
-                  <p className="mt-2 text-2xl font-bold text-zinc-950">&lt;3m</p>
-                  <p className="text-xs text-zinc-600">Median review time</p>
-                </div>
-              </div>
-            </div>
-          </motion.div>
-
           <motion.p
             className="text-lg text-zinc-700 max-w-2xl mx-auto mb-10"
             initial={{ opacity: 0, y: 20 }}

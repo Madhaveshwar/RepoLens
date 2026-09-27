@@ -45,7 +45,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
       }
     } catch (err: any) {
       if (!err.response) {
-        setError("Cannot reach the RepoLens AI server. Make sure the backend is running on port 8000, then try again.");
+        setError("We couldn't reach the password reset service. Please check your connection and try again.");
       } else {
         setError(err.response?.data?.detail || "Something went wrong. Please try again.");
       }
