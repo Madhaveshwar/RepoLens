@@ -20,6 +20,8 @@ def analyze_repository(
     temperature: float = 0.0,
     qualitative_report: str | None = None,
     ref: str | None = None,
+    tree_items: list | None = None,
+    content_provider: Any = None,
 ) -> dict[str, object]:
     logger.info(f"Triggered health analysis for repository: {repo_name}")
     g = github_service.client
@@ -31,19 +33,35 @@ def analyze_repository(
     logger.info(f"Repository default branch identified as: {default_branch}")
 
     # 1. Fetch the Git Tree recursively
-    tree_items = []
-    try:
-        branch = repo.get_branch(default_branch)
-        sha = branch.commit.sha
-        if ref:
-            # Prefer the caller-pinned commit for tree + content consistency.
-            sha = ref
-        logger.info(f"Analyzing ref {analysis_ref} (resolved SHA: {sha}). Requesting git tree recursively.")
-        git_tree = repo.get_git_tree(sha=sha, recursive=True)
-        tree_items = git_tree.tree
-        logger.info(f"Retrieved {len(tree_items)} elements from Git tree.")
-    except Exception as exc:
-        logger.error(f"Error fetching repo tree for {repo_name}: {exc}", exc_info=True)
+    # PERF: callers that already fetched the recursive tree (fast scan pipeline)
+    # pass it via `tree_items` so we do NOT make a second identical GitHub call.
+    # Content reads go through `content_provider` when provided so repeated file
+    # reads are served from the service-level cache instead of new API calls.
+    if tree_items is None:
+        tree_items = []
+        try:
+            branch = repo.get_branch(default_branch)
+            sha = branch.commit.sha
+            if ref:
+                # Prefer the caller-pinned commit for tree + content consistency.
+                sha = ref
+            logger.info(f"Analyzing ref {analysis_ref} (resolved SHA: {sha}). Requesting git tree recursively.")
+            git_tree = repo.get_git_tree(sha=sha, recursive=True)
+            tree_items = git_tree.tree
+            logger.info(f"Retrieved {len(tree_items)} elements from Git tree.")
+        except Exception as exc:
+            logger.error(f"Error fetching repo tree for {repo_name}: {exc}", exc_info=True)
+    else:
+        logger.info(f"Reusing caller-provided git tree ({len(tree_items)} elements) for {repo_name}.")
+
+    def _read_file(path: str) -> str:
+        if content_provider is not None:
+            try:
+                return content_provider(path) or ""
+            except Exception as exc:
+                logger.warning(f"content_provider failed for {path}: {exc}")
+                return ""
+        return github_service.get_file_content(repo_name, path, analysis_ref)
 
     # 2. Analyze files from the tree
     files = []
@@ -74,7 +92,7 @@ def analyze_repository(
                 readme_exists = True
             
             if os.path.basename(path).lower() == "requirements.txt":
-                requirements_content = github_service.get_file_content(repo_name, path, analysis_ref)
+                requirements_content = _read_file(path)
                 logger.info(f"Requirements.txt located. Read {len(requirements_content)} characters.")
 
             basename = os.path.basename(path).lower()
@@ -126,7 +144,7 @@ def analyze_repository(
     total_samples = len(sample_files)
     
     for path in sample_files:
-        content = github_service.get_file_content(repo_name, path, analysis_ref)
+        content = _read_file(path)
         if '"""' in content or "'''" in content or "/**" in content or "/*" in content:
             doc_hits += 1
 

@@ -1,4 +1,7 @@
 import re
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from github import Github
 from app.utils.logger import get_logger
 
@@ -113,6 +116,54 @@ class GitHubService:
         # file (150+ extra requests on a large scan).
         self._client_cache: dict[str, Github] = {}
         self._repo_obj_cache: dict[str, any] = {}
+        # PERF: per-(repo, path, ref) content cache. Analyzers (security, smells,
+        # health, dependencies, architecture, duplicates) each previously fetched
+        # the same files from GitHub again — one API round-trip per analyzer per
+        # file. This cache makes repeated reads free and thread-safe.
+        self._content_cache: dict[tuple[str, str, str], str] = {}
+        self._content_cache_lock = threading.Lock()
+
+    def fetch_files_parallel(
+        self,
+        repo_name: str,
+        paths: list[str],
+        ref: str,
+        max_workers: int = 8,
+        progress_callback=None,
+        progress_from: int = 0,
+        progress_to: int = 0,
+    ) -> dict[str, str]:
+        """Fetch many file contents from GitHub concurrently (bounded).
+
+        Replaces the old sequential per-file loop. With N files at ~0.5s per
+        API call, sequential fetching alone took minutes; 8 workers reduce it
+        to roughly N/8 * 0.5s. Returns {path: content} for successful fetches.
+        """
+        results: dict[str, str] = {}
+        if not paths:
+            return results
+        max_workers = max(1, min(max_workers, 12))
+        done_count = 0
+        total = len(paths)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_path = {
+                executor.submit(self.get_file_content, repo_name, path, ref): path
+                for path in paths
+            }
+            for future in as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    content = future.result()
+                except Exception as exc:
+                    logger.warning(f"Parallel fetch failed for {path}: {exc}")
+                    content = ""
+                if content:
+                    results[path] = content
+                done_count += 1
+                if progress_callback and progress_to > progress_from and (done_count % 10 == 0 or done_count == total):
+                    prog = progress_from + int((done_count / total) * (progress_to - progress_from))
+                    progress_callback(prog, "scanning", f"Fetched {done_count}/{total} files...", done_count, total, path)
+        return results
 
     def get_client_for_repo(self, repo_name: str) -> Github:
         """Get an authenticated Github client for a specific repository (cached)."""
@@ -276,7 +327,13 @@ class GitHubService:
             raise
  
     def get_file_content(self, repo_name: str, path: str, ref: str) -> str:
-        logger.info(f"Fetching file content for {path} (ref: {ref}) in repo: {repo_name}")
+        # PERF: serve repeats from the in-memory cache (keyed repo+path+ref).
+        # During one scan the same file is read by multiple analyzers; without
+        # this cache each read was a fresh GitHub API round-trip.
+        cache_key = (repo_name, path, ref)
+        with self._content_cache_lock:
+            if cache_key in self._content_cache:
+                return self._content_cache[cache_key]
         try:
             # PERF: reuse the cached Repository object instead of re-fetching it
             # for every single file request.
@@ -286,10 +343,12 @@ class GitHubService:
                 logger.warning(f"Path {path} returned a directory listing, not a file.")
                 return ""
             content = content_file.decoded_content.decode("utf-8", errors="replace")
-            logger.info(f"Successfully fetched {len(content)} characters of content for file {path}")
+            logger.debug(f"Fetched {len(content)} characters of content for file {path}")
+            with self._content_cache_lock:
+                self._content_cache[cache_key] = content
             return content
         except Exception as e:
-            logger.error(f"Failed to fetch file content for {path} (ref: {ref}) in {repo_name}: {e}", exc_info=True)
+            logger.warning(f"Failed to fetch file content for {path} (ref: {ref}) in {repo_name}: {e}")
             return ""
  
     def get_modified_lines(self, patch: str) -> set[int]:

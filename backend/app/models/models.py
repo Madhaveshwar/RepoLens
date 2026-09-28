@@ -111,6 +111,12 @@ class Analysis(Base):
     # Same repository + same commit + same analysis_version ⇒ the persisted
     # result can be reused instead of re-running the LLM.
     analysis_version = Column(String, nullable=True, index=True)
+    # ── Truthful live progress (persisted so polling clients see REAL state) ──
+    # Previously the UI showed generic stage names and "Files Scanned: 0"
+    # because polling reads the DB, which never stored these details.
+    status_message = Column(String(500), nullable=True)
+    current_file = Column(String(300), nullable=True)
+    total_files_count = Column(Integer, default=0)
 
     repository = relationship("Repository", back_populates="analyses")
     pull_request = relationship("PullRequest", back_populates="analyses")

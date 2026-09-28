@@ -426,6 +426,7 @@ export const Settings: React.FC<SettingsProps> = ({ onSaved }) => {
                       type={showKeys[provider.key] ? "text" : "password"}
                       placeholder={hasKey ? "Leave blank to keep current key" : provider.placeholder}
                       value={formKeys[provider.key]}
+                      onChange={(e) => setFormKeys((prev) => ({ ...prev, [provider.key]: e.target.value }))}
                       aria-label={provider.label}
                       className="input-glass text-sm pr-10"
                     />

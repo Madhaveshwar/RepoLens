@@ -114,11 +114,22 @@ def persist_health_snapshot(db, analysis_id, repo_id, commit_sha: str | None) ->
             pass
 
 
-def run_all_insights(db, analysis_id, repository: Repository, github_service, commit_sha: str | None = None) -> dict:
+def run_all_insights(
+    db,
+    analysis_id,
+    repository: Repository,
+    github_service,
+    commit_sha: str | None = None,
+    prefetched_source_files: list[dict] | None = None,
+) -> dict:
     """Run all deterministic insight analyzers and persist their results.
 
     Returns a dict of per-insight status info (for logging/debugging).
     Individual failures are logged and skipped — the scan itself continues.
+
+    PERF: callers that already fetched source file contents (e.g. the fast
+    scan pipeline) pass them via `prefetched_source_files` so this stage does
+    NOT re-fetch every file from GitHub a second time.
     """
     status: dict = {}
 
@@ -157,7 +168,9 @@ def run_all_insights(db, analysis_id, repository: Repository, github_service, co
 
     # ── 2. Duplicates ──────────────────────────────────────────────
     try:
-        source_files = fetcher.fetch_source_files()
+        # PERF: reuse caller-provided files when available; only fetch from
+        # GitHub when this orchestrator runs standalone (no prior fetch).
+        source_files = prefetched_source_files or fetcher.fetch_source_files()
         dup_result = detect_duplicates(
             source_files,
             min_lines=DEFAULT_MIN_BLOCK_LINES,

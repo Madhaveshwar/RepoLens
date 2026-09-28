@@ -36,6 +36,8 @@ MODEL_NAME = "openai/gpt-oss-120b"
 CHUNK_LINES = 400          # lines per chunk (chunk 1: 1-400, chunk 2: 401-800, ...)
 CHUNK_MAX_CHARS = 14_000   # per-chunk character budget for the LLM prompt
 MAX_FILES_PER_CHUNK = 4    # small files may share a chunk
+LLM_MAX_ATTEMPTS = 2       # one bounded retry; avoid multi-minute rate-limit waits
+LLM_MAX_RETRY_SECONDS = 8
 
 
 def build_file_chunks(content: str) -> list[dict]:
@@ -496,7 +498,13 @@ def review_files_combined(
         if not chunks and need_repo_insights:
             chunks = [[]]
 
-        logger.info(f"Complete-file chunking enabled: {len(uncached_files)} file(s) split into {len(chunks)} LLM prompt batch(es).")
+        logger.info(
+            "Scan LLM plan: files_selected=%d cache_hits=%d cache_misses=%d "
+            "chunks_created=%d batch_file_limit=%d batch_char_limit=%d",
+            len(files_to_review), len(files_to_review) - len(uncached_files),
+            len(uncached_files), len(chunks),
+            MAX_FILES_PER_CHUNK, CHUNK_MAX_CHARS,
+        )
         
         total_sec = 0
         total_smells = 0
@@ -519,12 +527,16 @@ def review_files_combined(
             
             logger.info(f"Chunk {chunk_idx+1}/{len(chunks)}: Prompt size={prompt_len} chars, files={len(files_chunk)}")
             
-            max_retries = 4
-            backoff = 10
+            attempts = 0
+            rate_limit_retries = 0
             result_text = ""
-            
-            for attempt in range(max_retries):
-                logger.info(f"LLM request start - Chunk {chunk_idx+1}/{len(chunks)}, attempt {attempt+1}/{max_retries} using model={active_model}")
+
+            for attempt in range(LLM_MAX_ATTEMPTS):
+                attempts += 1
+                logger.info(
+                    "LLM request start - chunk=%d/%d attempt=%d/%d model=%s",
+                    chunk_idx + 1, len(chunks), attempt + 1, LLM_MAX_ATTEMPTS, active_model,
+                )
                 try:
                     start_time = time.time()
                     chat_completion = client.chat.completions.create(
@@ -539,8 +551,10 @@ def review_files_combined(
                     result_text = chat_completion.choices[0].message.content
                     requests_made += 1
                     characters_sent += prompt_len
-                    logger.info(f"Groq response received for Chunk {chunk_idx+1}")
-                    logger.info(f"Groq request success - Chunk {chunk_idx+1} attempt {attempt+1} succeeded in {duration:.2f}s. Size: {len(result_text)} chars")
+                    logger.info(
+                        "LLM request completed - chunk=%d/%d attempt=%d duration=%.2fs response_chars=%d",
+                        chunk_idx + 1, len(chunks), attempt + 1, duration, len(result_text),
+                    )
                     
                     if hasattr(chat_completion, "usage") and chat_completion.usage:
                         token_stats["prompt_tokens"] += chat_completion.usage.prompt_tokens
@@ -550,15 +564,19 @@ def review_files_combined(
                     break
                 except Exception as e:
                     err_msg_lower = str(e).lower()
-                    logger.warning(f"LLM request failure - Chunk {chunk_idx+1} attempt {attempt+1} failed: {e}")
+                    logger.warning(
+                        "LLM request failed - chunk=%d/%d attempt=%d error_type=%s",
+                        chunk_idx + 1, len(chunks), attempt + 1, type(e).__name__,
+                    )
                     is_quota_error = "429" in err_msg_lower or "rate_limit" in err_msg_lower or "quota" in err_msg_lower or "limit exceeded" in err_msg_lower
                     if not is_quota_error and is_model_not_found_error(e) and active_model != GROQ_FALLBACK_MODEL:
                         logger.info(f"Model '{active_model}' unavailable. Falling back to {GROQ_FALLBACK_MODEL}.")
                         active_model = GROQ_FALLBACK_MODEL
                         token_stats["model_name"] = active_model
                         continue
-                    if is_quota_error and attempt < max_retries - 1:
-                        retry_after = 10
+                    if is_quota_error and attempt < LLM_MAX_ATTEMPTS - 1:
+                        rate_limit_retries += 1
+                        retry_after = 2
                         if hasattr(e, "response") and e.response is not None:
                             headers = getattr(e.response, "headers", {})
                             if "retry-after" in headers:
@@ -566,12 +584,18 @@ def review_files_combined(
                                     retry_after = int(headers.get("retry-after"))
                                 except:
                                     pass
-                        wait_time = max(backoff, retry_after)
-                        logger.info(f"Quota error (rate limit). Backing off for {wait_time} seconds...")
+                        wait_time = min(max(2, retry_after), LLM_MAX_RETRY_SECONDS)
+                        logger.warning(
+                            "LLM rate-limit retry - chunk=%d/%d retry=%d wait_seconds=%d",
+                            chunk_idx + 1, len(chunks), rate_limit_retries, wait_time,
+                        )
                         time.sleep(wait_time)
-                        backoff *= 2
+                        continue
                     else:
-                        logger.error(f"All Groq API retry attempts failed for chunk {chunk_idx+1}.", exc_info=True)
+                        logger.error(
+                            "LLM request abandoned - chunk=%d/%d attempts=%d rate_limit_retries=%d",
+                            chunk_idx + 1, len(chunks), attempts, rate_limit_retries,
+                        )
                         raise handle_groq_error(e)
             
             # Parse this chunk's response
@@ -631,7 +655,10 @@ def review_files_combined(
         save_cache(cache)
         
     cache_hits = len(files_to_review) - len(uncached_files)
-    logger.info(f"Combined files review completed. Cache Hits: {cache_hits}/{len(files_to_review)}, Requests Made: {requests_made}")
+    logger.info(
+        "Scan LLM summary: files=%d cache_hits=%d cache_misses=%d requests_completed=%d",
+        len(files_to_review), cache_hits, len(uncached_files), requests_made,
+    )
     return files_reviews_map, cache_hits, repo_insights, requests_made, characters_sent, token_stats
 
 def merge_and_dedupe_findings(existing: list, new: list) -> list:
@@ -1210,411 +1237,24 @@ def review_entire_repository(
     language_mapping: dict[str, str] | None = None,
     progress_callback: Any = None,
 ) -> dict[str, object]:
-    start_time = time.time()
-    if progress_callback:
-        progress_callback(10, "cloning", "Fetching repository file tree from GitHub...")
-    # PERF: cached Repository object (one API call per scan instead of per request)
-    repo = github_service.get_repo_object(repo_name)
-    default_branch = repo.default_branch
- 
-    tree_items = []
-    head_sha = None
-    try:
-        branch = repo.get_branch(default_branch)
-        # PIN the exact commit: the whole scan (tree + file contents) is
-        # fetched against this SHA so a scan always represents one and the
-        # same repository state — never "whatever the branch points at now".
-        head_sha = branch.commit.sha
-        git_tree = repo.get_git_tree(sha=head_sha, recursive=True)
-        tree_items = git_tree.tree
-    except Exception as exc:
-        print(f"Error fetching repo tree: {exc}")
- 
-    if progress_callback:
-        progress_callback(20, "indexing", "Indexing and prioritizing source files...")
-        
-    source_files_with_sizes = []
-    for item in tree_items:
-        if item.type == "blob":
-            path = item.path
-            if should_skip_file(path):
-                continue
-            is_source = any(
-                path.endswith(ext)
-                for ext in [
-                    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".cs",
-                    ".go", ".rb", ".php", ".cpp", ".c", ".rs", ".kt", ".swift"
-                ]
-            )
-            basename = os.path.basename(path).lower()
-            is_test = (
-                "test" in basename or "spec" in basename
-                or path.startswith("tests/") or path.startswith("test/")
-            )
-            if is_source and not is_test:
-                source_files_with_sizes.append((path, item.size or 0))
- 
-    # DETERMINISTIC ORDERING: primary key = size (largest first, so the
-    # most important files are LLM-reviewed), tie-break = path ascending.
-    # Pure size ordering left ties to arbitrary dict order, so two scans
-    # could review DIFFERENT files for the same commit.
-    source_files_with_sizes.sort(key=lambda x: (-x[1], x[0]))
-    # EVERY supported source file is considered for analysis — no arbitrary
-    # 5-file cutoff. Deterministic ordering (largest first, path tie-break)
-    # keeps fetch order stable for the same commit.
-    scanned_files = [path for path, size in source_files_with_sizes]
-    source_files = scanned_files
-    
-    files_to_review = []
-    if not language_mapping:
-        language_mapping = {}
- 
-    total_files = len(scanned_files)
-    for idx, filename in enumerate(scanned_files):
-        if progress_callback:
-            prog = 30 + int((idx / max(1, total_files)) * 40)
-            progress_callback(
-                prog,
-                "scanning",
-                f"Fetching & scanning repository file {idx+1}/{total_files}...",
-                idx,
-                total_files,
-                filename
-            )
-            
-        # Fetch against the PINNED commit SHA (not the moving branch ref) so
-        # every file in this scan comes from exactly the same snapshot.
-        content = github_service.get_file_content(repo_name, filename, head_sha or default_branch)
-        if not content or not is_valid_code(content):
-            continue
- 
-        # NO TRUNCATION: the complete file content is reviewed (chunked into
-        # deterministic pieces by review_files_combined).
-        ext = os.path.splitext(filename)[1].lower()
-        ext_map = {
-            ".py": "Python", ".js": "JavaScript", ".jsx": "JavaScript",
-            ".ts": "TypeScript", ".tsx": "TypeScript", ".java": "Java",
-            ".cs": "C#", ".go": "Go", ".rb": "Ruby", ".php": "PHP",
-            ".cpp": "C/C++", ".c": "C/C++", ".h": "C/C++", ".rs": "Rust",
-            ".kt": "Kotlin", ".swift": "Swift",
-        }
-        detected_lang = ext_map.get(ext, "Python")
-        lang = language_mapping.get(filename, detected_lang)
- 
-        dummy_patch = f"@@ -1,1 +1,{len(content.splitlines())} @@\n" + "\n".join(f"+{line}" for line in content.splitlines())
- 
-        files_to_review.append({
-            "filename": filename, "content": content, "patch": dummy_patch, "language": lang
-        })
- 
-    # DETERMINISTIC ORDERING of the LLM review batch: alphabetical path.
-    # Chunk grouping and prompt composition then depend only on the commit
-    # content — never on cache state or fetch ordering.
-    files_to_review.sort(key=lambda f: f["filename"])
+    """Fast whole-repository scan: complete local analysis + 1-3 LLM synthesis calls.
 
-    try:
-        repo_metadata = analyze_repository(
-            client=client,
-            github_service=github_service,
-            repo_name=repo_name,
-            ref=head_sha or default_branch,
-            qualitative_report="PENDING"
-        )
-    except Exception as e:
-        raise handle_groq_error(e)
- 
-    if progress_callback:
-        progress_callback(70, "generating_tests", "Generating test suggestions...", total_files, total_files, "")
- 
-    if progress_callback:
-        progress_callback(85, "generating_insights", "Analyzing repository qualitative health report...", total_files, total_files, "")
- 
-    files_reviews_map, cache_hits, repo_insights, requests_made, characters_sent, token_stats = review_files_combined(
-        client=client,
-        files_to_review=files_to_review,
-        repo_metadata=repo_metadata,
+    Delegates to fast_scan_pipeline.fast_review_entire_repository which:
+    1. Inventories ALL repository files locally
+    2. Fetches all relevant source file contents
+    3. Runs security, quality, complexity, duplicate, dependency, and
+       architecture analyses IN PARALLEL
+    4. Builds a compact repository summary
+    5. Sends 1 LLM request (max 3) for intelligent synthesis
+    6. Returns complete results in under 2 minutes
+
+    The return dict schema is unchanged — tasks.py needs no modifications.
+    """
+    from app.services.fast_scan_pipeline import fast_review_entire_repository
+    return fast_review_entire_repository(
         repo_name=repo_name,
-        model_name=MODEL_NAME
-    )
-
-    all_findings = []
-    test_suggestions_by_file = {}
-    files_analyzed_count = len(files_to_review)
-    cached_results_used = cache_hits
-    groq_requests_made = requests_made
-    characters_analyzed_count = characters_sent
-
-    for filename, res_dict in files_reviews_map.items():
-        # ── Get source lines for evidence validation ──
-        source_content = ""
-        for f in files_to_review:
-            if f["filename"] == filename:
-                source_content = f.get("content", f.get("truncated_content", ""))
-                break
-        source_lines = source_content.splitlines() if source_content else []
-        validated_count = 0
-        rejected_count = 0
-
-        general_issues = []
-        for item in res_dict.get("inline_comments", []):
-            if isinstance(item, dict):
-                if source_lines and not validate_finding_evidence(item, source_lines):
-                    rejected_count += 1
-                    logger.info(f"Rejected LLM finding (no evidence): {filename}:{item.get('line')} - {item.get('issue','')[:60]}")
-                    continue
-                validated_count += 1
-                general_issues.append({
-                    "file": filename,
-                    "line": int(item.get("line", 1)) if str(item.get("line")).isdigit() else 1,
-                    "severity": item.get("severity", "Medium"),
-                    "category": item.get("category", "Bug"),
-                    "issue": item.get("issue", "Quality or logic concern"),
-                    "suggestion": item.get("suggestion", "Please verify this code."),
-                    "why_it_matters": item.get("why_it_matters", "No explanation provided."),
-                    "risk_level": item.get("risk_level", item.get("severity", "Medium")),
-                    "before_code": item.get("before_code", ""),
-                    "after_code": item.get("after_code", ""),
-                    "source": "ai_analysis",
-                })
-
-        security_issues = []
-        for item in res_dict.get("security_findings", []):
-            if isinstance(item, dict):
-                if source_lines and not validate_finding_evidence(item, source_lines):
-                    rejected_count += 1
-                    logger.info(f"Rejected LLM security finding (no evidence): {filename}:{item.get('line')} - {item.get('issue','')[:60]}")
-                    continue
-                validated_count += 1
-                security_issues.append({
-                    "file": filename,
-                    "line": int(item.get("line", 1)) if str(item.get("line")).isdigit() else 1,
-                    "severity": item.get("severity", "Medium"),
-                    "category": "Security",
-                    "issue": item.get("issue", "Potential vulnerability found"),
-                    "suggestion": item.get("suggestion", "Please verify and secure this code."),
-                    "why_it_matters": item.get("why_it_matters", "No explanation provided."),
-                    "risk_level": item.get("risk_level", item.get("severity", "Medium")),
-                    "before_code": item.get("before_code", ""),
-                    "after_code": item.get("after_code", ""),
-                    "source": "ai_analysis",
-                })
-
-        smell_issues = []
-        for item in res_dict.get("code_smells", []):
-            if isinstance(item, dict):
-                if source_lines and not validate_finding_evidence(item, source_lines):
-                    rejected_count += 1
-                    logger.info(f"Rejected LLM smell finding (no evidence): {filename}:{item.get('line')} - {item.get('issue','')[:60]}")
-                    continue
-                validated_count += 1
-                smell_issues.append({
-                    "file": filename,
-                    "line": int(item.get("line", 1)) if str(item.get("line")).isdigit() else 1,
-                    "severity": item.get("severity", "Low"),
-                    "category": "Code Smell",
-                    "issue": item.get("issue", "Code quality smell detected"),
-                    "suggestion": item.get("suggestion", "Please refactor this code to clean it up."),
-                    "why_it_matters": item.get("why_it_matters", "No explanation provided."),
-                    "risk_level": item.get("risk_level", item.get("severity", "Low")),
-                    "before_code": item.get("before_code", ""),
-                    "after_code": item.get("after_code", ""),
-                    "source": "ai_analysis",
-                })
-
-        # ── Evidence backfill: replace empty/unverified before_code with the
-        # REAL source line from the fetched content. The LLM may describe the
-        # issue without quoting the code; the line is verified in-file, so
-        # the evidence shown in the UI is actual source (never fabricated).
-        for issue in security_issues + smell_issues + general_issues:
-            if not (issue.get("before_code") or "").strip():
-                ln = issue.get("line") or 0
-                if 1 <= ln <= len(source_lines):
-                    issue["before_code"] = source_lines[ln - 1].strip()[:300]
-                    issue["evidence_verified"] = True
-
-        # ── Run static scanners to supplement/correct LLM findings ──
-        # Detect language from file extension
-        ext = os.path.splitext(filename)[1].lower()
-        lang_ext_map = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
-                         ".jsx": "JavaScript", ".tsx": "TypeScript", ".java": "Java",
-                         ".go": "Go", ".rb": "Ruby", ".php": "PHP"}
-        detected_lang = lang_ext_map.get(ext, "Python")
-        static_results = apply_static_scanners(filename, source_content, detected_lang)
-        static_sec = static_results.get("security_findings", [])
-        static_smells = static_results.get("code_smells", [])
-
-        # Merge static findings (avoid duplicates with LLM findings)
-        llm_keys = set()
-        for f in security_issues + smell_issues:
-            llm_keys.add((f["line"], f["issue"][:60]))
-
-        for sf in static_sec:
-            key = (sf["line"], sf["issue"][:60])
-            if key not in llm_keys:
-                llm_keys.add(key)
-                security_issues.append({
-                    "file": filename,
-                    "line": sf["line"],
-                    "severity": sf.get("severity", "Medium"),
-                    "category": "Security",
-                    "issue": sf["issue"],
-                    "suggestion": sf.get("suggestion", ""),
-                    "why_it_matters": sf.get("why_it_matters", sf["issue"]),
-                    "risk_level": sf.get("risk_level", sf.get("severity", "Medium")),
-                    "before_code": sf.get("before_code", ""),
-                    "after_code": sf.get("after_code", ""),
-                    "source": "static_analysis",
-                })
-                validated_count += 1
-
-        for sf in static_smells:
-            key = (sf["line"], sf["issue"][:60])
-            if key not in llm_keys:
-                llm_keys.add(key)
-                smell_issues.append({
-                    "file": filename,
-                    "line": sf["line"],
-                    "severity": sf.get("severity", "Medium"),
-                    "category": "Code Smell",
-                    "issue": sf["issue"],
-                    "suggestion": sf.get("suggestion", ""),
-                    "why_it_matters": sf.get("why_it_matters", sf["issue"]),
-                    "risk_level": sf.get("risk_level", sf.get("severity", "Medium")),
-                    "before_code": sf.get("before_code", ""),
-                    "after_code": sf.get("after_code", ""),
-                    "source": "static_analysis",
-                })
-                validated_count += 1
-
-        logger.info(f"Evidence validation for {filename}: {validated_count} accepted, {rejected_count} rejected (hallucinations), static: {len(static_sec)}+{len(static_smells)}")
-        all_findings.extend(security_issues + smell_issues + general_issues)
-
-        if len(test_suggestions_by_file) < 1 and res_dict.get("test_suggestions"):
-            test_suggestions_by_file[filename] = res_dict["test_suggestions"]
-
-    repo_analysis = analyze_repository(
-        client=client,
         github_service=github_service,
-        repo_name=repo_name,
-        qualitative_report=repo_insights or "No qualitative report available."
+        client=client,
+        language_mapping=language_mapping,
+        progress_callback=progress_callback,
     )
-
-    severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
-    for f in all_findings:
-        sev = f["severity"]
-        if sev in severity_counts:
-            severity_counts[sev] += 1
-
-    risk_score = min(
-        100,
-        25 * severity_counts["Critical"]
-        + 15 * severity_counts["High"]
-        + 6 * severity_counts["Medium"]
-        + 1 * severity_counts["Low"]
-    )
-
-    inline_comments = []
-    for f in all_findings:
-        body_text = f"File: {f['file']}\nLine: {f['line']}\nIssue: {f['issue']}\nSeverity: {f['severity']}\nRecommendation: {f['suggestion']}"
-        inline_comments.append({
-            "file": f["file"],
-            "line": f["line"],
-            "body": body_text,
-            "patch": f"@@ -1,1 +1,{f['line']} @@\n+{f['issue']}",
-        })
-
-    files_analyzed_log = []
-    # Honest per-file accounting: every tree blob gets exactly one entry whose
-    # status reflects what actually happened:
-    #   analyzed       → reviewed by the LLM/static scanners (findings counted)
-    #   skipped        → ignored pattern (deps/binary/generated) — real reason
-    #   unsupported    → not a supported source extension
-    #   failed         → fetch/validation failed — reason recorded
-    analyzed_files_set = {f["filename"] for f in files_to_review}
-    fetched_failed = set()
-    for path, _size in source_files_with_sizes:
-        if path not in analyzed_files_set:
-            fetched_failed.add(path)
-    for item in tree_items:
-        if item.type == "blob":
-            path = item.path
-            ext = os.path.splitext(path)[1].lower()
-            ext_map = {
-                ".py": "Python", ".js": "JavaScript", ".jsx": "JavaScript",
-                ".ts": "TypeScript", ".tsx": "TypeScript", ".java": "Java",
-                ".cs": "C#", ".go": "Go", ".rb": "Ruby", ".php": "PHP",
-                ".cpp": "C/C++", ".c": "C/C++", ".h": "C/C++", ".rs": "Rust",
-                ".kt": "Kotlin", ".swift": "Swift",
-            }
-            detected_lang = ext_map.get(ext, "Other")
-            file_type = detected_lang
-            if ext in [".md", ".txt"]:
-                file_type = "Documentation"
-            elif ext in [".json", ".yaml", ".yml", ".ini", ".cfg", ".toml", ".xml"]:
-                file_type = "Configuration"
-
-            is_source = detected_lang != "Other"
-
-            if path in analyzed_files_set:
-                file_findings_count = len([fn for fn in all_findings if fn["file"] == path])
-                files_analyzed_log.append({
-                    "file": path, "type": file_type, "status": "Analyzed", "findings": file_findings_count
-                })
-            elif should_skip_file(path):
-                files_analyzed_log.append({
-                    "file": path, "type": file_type, "status": "Skipped",
-                    "reason": "ignored pattern (build artifact, dependency lock, binary or generated file)",
-                    "findings": 0
-                })
-            elif path in fetched_failed:
-                files_analyzed_log.append({
-                    "file": path, "type": file_type, "status": "Failed",
-                    "reason": "content fetch or code validation failed (empty, binary or non-source content)",
-                    "findings": 0
-                })
-            elif is_source:
-                files_analyzed_log.append({
-                    "file": path, "type": file_type, "status": "Unsupported", "findings": 0
-                })
-            else:
-                files_analyzed_log.append({
-                    "file": path, "type": file_type, "status": "Skipped",
-                    "reason": "not a supported source file",
-                    "findings": 0
-                })
-
-    test_suggestions_md = []
-    for fn, tests in test_suggestions_by_file.items():
-        test_suggestions_md.append(f"### File: {fn}\n{tests}\n")
-    test_suggestions_compiled = "\n".join(test_suggestions_md)
-
-    latency = round(time.time() - start_time, 2)
-    estimated_tokens_count = characters_analyzed_count // 4
-
-    repo_file_scores = [res_dict.get("scores", {}) for res_dict in files_reviews_map.values() if isinstance(res_dict, dict) and "scores" in res_dict]
-    overall_repo_scores = resolve_scores(repo_file_scores, risk_score, severity_counts)
-
-    return {
-        "repo_name": repo_name,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        "risk_score": risk_score,
-        "findings": all_findings,
-        "inline_comments": inline_comments,
-        "test_suggestions": test_suggestions_compiled,
-        "repo_analysis": repo_analysis,
-        "severity_counts": severity_counts,
-        "latency_seconds": latency,
-        # The exact commit this scan analyzed (pinned at scan start).
-        "head_sha": head_sha,
-        "branch": default_branch,
-        "total_files_analyzed": len(scanned_files),
-        "total_files_count": len(source_files),
-        "files_analyzed_log": files_analyzed_log,
-        "files_analyzed_count": files_analyzed_count,
-        "characters_analyzed_count": characters_analyzed_count,
-        "estimated_tokens_count": estimated_tokens_count,
-        "groq_requests_made": groq_requests_made,
-        "cached_results_used": cached_results_used,
-        "scores": overall_repo_scores,
-        "token_stats": token_stats,
-    }

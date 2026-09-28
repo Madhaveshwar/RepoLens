@@ -377,23 +377,33 @@ def test_review_entire_repository():
     mock_repo.get_git_tree.return_value = mock_git_tree
     
     mock_gh_service.get_file_content.return_value = "def my_func(): pass"
+    # Fast scan pipeline fetches file contents via the parallel batch helper.
+    mock_gh_service.fetch_files_parallel.return_value = {
+        "main.py": "def my_func(): pass"
+    }
     
-    # Mock Groq client
+    # Mock Groq client — fast scan pipeline uses a different LLM response schema
     mock_groq = MagicMock()
     mock_response = MagicMock()
     
+    # The fast scan pipeline expects this JSON schema from the LLM synthesis
     response_json = {
-        "files_reviews": {
-            "main.py": {
-                "security_findings": [],
-                "code_smells": [],
-                "inline_comments": [],
-                "test_suggestions": "Unit tests recommendations",
-                "severity_score": 0,
-                "scores": {}
-            }
+        "repository_overview": "A simple repository with one Python file.",
+        "architecture_assessment": "Single-file architecture.",
+        "critical_issues": [],
+        "security_assessment": "No security issues found.",
+        "code_quality_assessment": "Repo-level suggestions for improvement.",
+        "technical_debt_summary": "Minimal technical debt.",
+        "top_recommendations": ["Add tests", "Add README"],
+        "test_suggestions": "Unit tests recommendations",
+        "scores": {
+            "code_quality": 80,
+            "security": 90,
+            "maintainability": 75,
+            "performance": 85,
+            "technical_debt": 20
         },
-        "repository_insights": "Repo-level suggestions"
+        "qualitative_report": "Repo-level suggestions and detailed analysis."
     }
     
     mock_response.choices = [
@@ -409,6 +419,7 @@ def test_review_entire_repository():
     
     assert res["total_files_analyzed"] == 1
     assert "Repo-level suggestions" in res["repo_analysis"]["analysis_report"]
+
 
 
 def test_review_single_code_snippet():

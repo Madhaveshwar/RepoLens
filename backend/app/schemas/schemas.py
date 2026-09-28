@@ -195,6 +195,10 @@ class AnalysisOut(UTCTimestampMixin, BaseModel):
     commit_sha: Optional[str] = None
     branch: Optional[str] = None
     analysis_version: Optional[str] = None
+    # Real live progress details persisted by the scan worker.
+    status_message: Optional[str] = None
+    current_file: Optional[str] = None
+    total_files_count: Optional[int] = 0
     timestamp: datetime
 
     model_config = {"from_attributes": True}

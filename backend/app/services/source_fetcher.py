@@ -96,6 +96,7 @@ class RepoSourceFetcher:
         self._repo = self._client.get_repo(repo_name)
         self.default_branch = self._repo.default_branch or "main"
         self._branch_sha: str | None = None
+        self._tree_items: list[Any] | None = None
         self.truncated = False
         self._fetch_budget_used = 0
         self._content_cache: dict[tuple[str, str], str] = {}
@@ -116,6 +117,8 @@ class RepoSourceFetcher:
 
     def get_tree_items(self, branch: str | None = None) -> list[Any]:
         """Return blob entries of the recursive git tree (real files only)."""
+        if self._tree_items is not None:
+            return self._tree_items
         sha = self.get_branch_sha(branch)
         if not sha:
             return []
@@ -124,7 +127,8 @@ class RepoSourceFetcher:
             self.truncated = bool(getattr(git_tree, "truncated", False))
             if self.truncated:
                 logger.warning(f"Git tree for {self.repo_name} was truncated by GitHub; analysis covers the retrieved subset only.")
-            return [item for item in git_tree.tree if item.type == "blob"]
+            self._tree_items = [item for item in git_tree.tree if item.type == "blob"]
+            return self._tree_items
         except Exception as exc:
             logger.error(f"Failed to fetch git tree for {self.repo_name}: {exc}")
             return []

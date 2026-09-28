@@ -167,6 +167,9 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
     error: null,
 
     triggerAnalysis: async (repoId, prNumber) => {
+      if (get().loading || (get().progress > 0 && get().progress < 100)) {
+        throw new Error("An analysis is already in progress.");
+      }
       set({ loading: true, progress: 0, progressStatus: "Triggering analysis job...", progressDetailed: null });
       try {
         const res = await axios.post("/analysis/trigger", {
@@ -249,19 +252,13 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
           pollRetryCount = 0; // Reset on success
 
           const pct = data.progress;
-          const stageMsg = statusToStageMessage(data.status, pct);
+          // TRUTHFUL PROGRESS: prefer the backend's real status message and
+          // file counts (persisted by the scan worker). The generic stage-name
+          // mapping is only a fallback for very old rows.
+          const stageMsg = data.status_message || statusToStageMessage(data.status, pct);
 
-          // Estimate total_files when backend only returns files_analyzed_count
           const filesAnalyzed = data.files_analyzed_count || 0;
-          let totalFiles = data.total_files || 0;
-          if (totalFiles === 0 && pct > 0 && filesAnalyzed > 0) {
-            totalFiles = Math.round(filesAnalyzed / Math.max(pct / 100, 0.01));
-          } else if (totalFiles === 0 && pct > 0) {
-            // If we have progress but no files yet, show "estimating..."
-            totalFiles = -1; // sentinel: show "?" in UI
-          } else if (totalFiles === 0) {
-            totalFiles = 0; // initial state, keep as 0
-          }
+          const totalFiles = data.total_files_count || 0;
 
           set((state) => ({
             progress: pct,
@@ -341,6 +338,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => {
 
         set((state) => ({
           progress: data.progress,
+          // WS messages carry the backend's REAL status message — use it.
           progressStatus: data.message || data.status,
           activeAnalysis: {
             ...state.activeAnalysis,

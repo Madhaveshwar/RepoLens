@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 from celery import Celery
 import redis
 import json
@@ -23,6 +24,13 @@ from app.services.insights_orchestrator import run_all_insights
 from app.utils.logger import get_logger
 
 logger = get_logger("celery_worker")
+
+# ── Progress DB-write throttle ────────────────────────────────────
+# Redis publish happens on EVERY progress event (cheap), but the DB commit is
+# throttled to at most one write per second per analysis (terminal events
+# always commit). Previously every progress tick was a full DB commit.
+PROGRESS_DB_COMMIT_INTERVAL = 1.0
+_last_progress_commit: dict = {}
 
 # ──────────────────────────────────────────────────────────────────
 #  REDIS & CELERY INITIALIZATION  (graceful fallback)
@@ -99,18 +107,38 @@ def update_progress(
         session = local_db
         should_close_db = True
 
+    now_s = time.time()
+    is_terminal = progress >= 100
+    should_write = (
+        is_terminal
+        or (now_s - _last_progress_commit.get(analysis_id, 0.0)) >= PROGRESS_DB_COMMIT_INTERVAL
+    )
     try:
-        analysis = session.query(Analysis).filter(Analysis.id == analysis_id).first()
-        if analysis:
-            analysis.progress = progress
-            if progress >= 100:
-                if "failed" in status_message.lower():
-                    analysis.status = "failed"
+        if should_write:
+            analysis = session.query(Analysis).filter(Analysis.id == analysis_id).first()
+            if analysis:
+                analysis.progress = progress
+                if files_analyzed > analysis.files_analyzed_count:
+                    analysis.files_analyzed_count = files_analyzed
+                if progress >= 100:
+                    if "failed" in status_message.lower():
+                        analysis.status = "failed"
+                    else:
+                        analysis.status = "completed"
                 else:
-                    analysis.status = "completed"
-            else:
-                analysis.status = status
-            session.commit()
+                    analysis.status = status
+                # Persist real progress details so polling clients (which read
+                # the DB) see the same truth Redis subscribers see. previously
+                # these columns did not exist, so the UI showed "Files Scanned:
+                # 0" / generic stage names even while files were being analyzed.
+                # total_files_count is never lowered — terminal events don't
+                # reset the file totals discovered mid-scan.
+                if total_files > (analysis.total_files_count or 0):
+                    analysis.total_files_count = total_files
+                analysis.status_message = str(status_message or "")[:500]
+                analysis.current_file = str(current_file or "")[:300]
+                session.commit()
+            _last_progress_commit[analysis_id] = now_s
     finally:
         if should_close_db and local_db is not None:
             local_db.close()
@@ -140,15 +168,13 @@ def update_progress(
 # routers never crash on startup.
 
 if celery_app is not None:
-    # Register as a proper Celery task with retry & routing
-    @celery_app.task(
-        bind=True,
-        max_retries=3,
-        default_retry_delay=10,
-        autoretry_for=(Exception,),
-        retry_backoff=True,
-        retry_kwargs={"max_retries": 3}
-    )
+    # Register as a proper Celery task.
+    # PERF FIX: NO autoretry. The previous autoretry_for=(Exception,) with
+    # backoff re-ran the ENTIRE scan (clone, fetch, analysis, LLM) up to 3
+    # more times on any transient error — the main cause of 5–15 minute
+    # scans. A failed scan must fail once, quickly, with a clear message;
+    # the user can retry manually if needed.
+    @celery_app.task(bind=True, max_retries=0)
     def run_analysis_task(self, analysis_id: str):
         return _run_analysis_impl(self, analysis_id)
 else:
@@ -170,7 +196,14 @@ else:
 
 # Bump when the scan pipeline/prompts change in a way that should invalidate
 # previously stored results (same commit + same version ⇒ reuse stored result).
-ANALYSIS_VERSION = "v2-full-file-chunked"
+ANALYSIS_VERSION = "v4-fast-scan"
+
+# ── Duplicate-scan guard ─────────────────────────────────────────
+# Prevents two workers from running the SAME expensive scan (same repository +
+# same commit) concurrently. The second request attaches to the first instead
+# of repeating clone/fetch/analysis/LLM work.
+_active_scan_locks = threading.Lock()
+_active_scans: set = set()
 
 
 def build_scan_cache_key(repository_id, commit_sha: str, provider: str, model_name: str) -> str:
@@ -295,6 +328,202 @@ def _materialize_cached_result(db, analysis, payload: dict, provider: str, model
     logger.info(f"Materialized cached analysis {analysis_id} from stored result (commit {analysis.commit_sha}).")
 
 
+def _persist_precomputed_insights(db, analysis_id, repo, precomputed: dict, commit_sha: str | None) -> dict:
+    """Persist pre-computed insight results from the fast scan pipeline.
+
+    The fast_scan_pipeline already ran dependency, duplicate, complexity,
+    architecture, and technical debt analyses in parallel. This function
+    writes those results directly to the DB instead of re-running them
+    through the insights_orchestrator (which would fetch files again and
+    repeat all the analysis).
+
+    Returns a dict of per-insight status info (same format as run_all_insights).
+    """
+    import uuid as std_uuid
+    from app.models.models import (
+        DependencyFinding, DuplicateCodeFinding, TechnicalDebtFinding,
+        ArchitectureAnalysis, ComplexityFinding, SecurityFinding, CodeSmell,
+    )
+    from app.services.technical_debt_analyzer import build_technical_debt_report
+    from app.services.insights_orchestrator import persist_health_snapshot
+
+    status: dict = {}
+
+    # ── 1. Dependencies ────────────────────────────────────────────
+    try:
+        dep_result = precomputed.get("dependency_result", {})
+        dep_findings = dep_result.get("findings", [])
+        for f in dep_findings:
+            db.add(DependencyFinding(
+                analysis_id=analysis_id,
+                ecosystem=f.get("ecosystem", "unknown"),
+                manifest_file=f.get("manifest_file", ""),
+                package_name=f.get("package_name", ""),
+                version_spec=f.get("version_spec"),
+                resolved_version=f.get("resolved_version"),
+                status=f.get("status", "unknown"),
+                severity=f.get("severity"),
+                advisory_id=f.get("advisory_id"),
+                vulnerable_range=f.get("vulnerable_range"),
+                recommended_version=f.get("recommended_version"),
+                advisory_url=f.get("advisory_url"),
+                evidence=f.get("evidence"),
+            ))
+        db.commit()
+        dep_summary = dep_result.get("summary", {})
+        status["dependencies"] = {
+            "ok": True,
+            "total": dep_summary.get("total", len(dep_findings)),
+            "vulnerable": dep_summary.get("known_vulnerable", 0),
+            "manifests": len(dep_result.get("manifests_scanned", [])),
+        }
+    except Exception as exc:
+        logger.error(f"Precomputed dependency persist failed (non-fatal): {exc}", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        status["dependencies"] = {"ok": False, "error": str(exc)[:200]}
+
+    # ── 2. Duplicates ──────────────────────────────────────────────
+    try:
+        dup_result = precomputed.get("duplicate_result", {})
+        dup_findings = dup_result.get("findings", [])
+        for d in dup_findings:
+            db.add(DuplicateCodeFinding(
+                analysis_id=analysis_id,
+                file_a=d.get("file_a", ""), start_line_a=d.get("start_line_a", 0),
+                end_line_a=d.get("end_line_a", 0),
+                file_b=d.get("file_b", ""), start_line_b=d.get("start_line_b", 0),
+                end_line_b=d.get("end_line_b", 0),
+                similarity=d.get("similarity", 0), duplicated_lines=d.get("duplicated_lines", 0),
+                token_hash=d.get("token_hash", ""), snippet=d.get("snippet", ""),
+            ))
+        db.commit()
+        status["duplicates"] = {
+            "ok": True, "count": len(dup_findings),
+            "files_analyzed": dup_result.get("files_analyzed", 0),
+        }
+    except Exception as exc:
+        logger.error(f"Precomputed duplicate persist failed (non-fatal): {exc}", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        status["duplicates"] = {"ok": False, "error": str(exc)[:200]}
+
+    # ── 3. Complexity ──────────────────────────────────────────────
+    try:
+        cx_result = precomputed.get("complexity_result", {})
+        cx_findings = cx_result.get("findings", [])
+        for c in cx_findings:
+            db.add(ComplexityFinding(
+                analysis_id=analysis_id,
+                file=c.get("file", ""), name=c.get("name", ""), kind=c.get("kind", "function"),
+                line_start=c.get("line_start", 0), line_end=c.get("line_end"),
+                cyclomatic_complexity=c.get("cyclomatic_complexity", 0),
+                nesting_depth=c.get("nesting_depth"),
+                length_lines=c.get("length_lines"),
+                language=c.get("language"),
+                severity=c.get("severity", "Info"),
+                explanation=c.get("explanation"),
+                suggestion=c.get("suggestion"),
+            ))
+        db.commit()
+        cx_summary = cx_result.get("summary", {})
+        status["complexity"] = {"ok": True, "reported": cx_summary.get("reported", len(cx_findings))}
+    except Exception as exc:
+        logger.error(f"Precomputed complexity persist failed (non-fatal): {exc}", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        status["complexity"] = {"ok": False, "error": str(exc)[:200]}
+
+    # ── 4. Architecture ────────────────────────────────────────────
+    try:
+        arch_result = precomputed.get("architecture_result", {})
+        if arch_result:
+            db.add(ArchitectureAnalysis(analysis_id=analysis_id, result=arch_result))
+            db.commit()
+        status["architecture"] = {
+            "ok": True,
+            "frameworks": len(arch_result.get("frameworks", [])),
+            "concerns": len(arch_result.get("concerns", [])),
+        }
+    except Exception as exc:
+        logger.error(f"Precomputed architecture persist failed (non-fatal): {exc}", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        status["architecture"] = {"ok": False, "error": str(exc)[:200]}
+
+    # ── 5. Technical debt ──────────────────────────────────────────
+    try:
+        # PERF: the debt report may already have been computed during the fresh
+        # scan and stored in the cache payload — reuse it instead of rebuilding.
+        debt_result = precomputed.get("technical_debt_result")
+        if not debt_result:
+            sec_rows = db.query(SecurityFinding).filter(SecurityFinding.analysis_id == analysis_id).all()
+            smell_rows = db.query(CodeSmell).filter(CodeSmell.analysis_id == analysis_id).all()
+            sec_dicts = [{"severity": s.severity, "issue": s.issue, "file": s.file, "line": s.line} for s in sec_rows]
+            smell_dicts = [{"severity": s.severity, "issue": s.issue, "file": s.file, "line": s.line} for s in smell_rows]
+
+            dup_result_for_debt = precomputed.get("duplicate_result", {"findings": [], "parameters": {}})
+            cx_result_for_debt = precomputed.get("complexity_result", {"findings": [], "summary": {}})
+            dep_result_for_debt = precomputed.get("dependency_result", {})
+            source_files = precomputed.get("source_files", [])
+
+            debt_result = build_technical_debt_report(
+                security_findings=sec_dicts,
+                code_smells=smell_dicts,
+                duplicates=dup_result_for_debt,
+                complexity=cx_result_for_debt,
+                source_files=source_files,
+                dependencies=dep_result_for_debt,
+            )
+            # Store the built report back into the precomputed dict so the
+            # caller can persist it in the result cache (cache hits then skip
+            # the rebuild entirely and no file contents need to be cached).
+            try:
+                precomputed["technical_debt_result"] = debt_result
+            except Exception:
+                pass
+        for item in debt_result.get("items", []):
+            db.add(TechnicalDebtFinding(
+                analysis_id=analysis_id,
+                category=item["category"],
+                severity=item["severity"],
+                title=item["title"],
+                evidence=item["evidence"],
+                file=item.get("file"),
+                line_start=item.get("line_start"),
+                line_end=item.get("line_end"),
+                estimated_effort_hours=item.get("estimated_effort_hours"),
+                remediation=item.get("remediation"),
+            ))
+        db.commit()
+        status["technical_debt"] = {"ok": True, "items": len(debt_result.get("items", []))}
+    except Exception as exc:
+        logger.error(f"Precomputed technical debt persist failed (non-fatal): {exc}", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        status["technical_debt"] = {"ok": False, "error": str(exc)[:200]}
+
+    # ── 6. Health snapshot ─────────────────────────────────────────
+    try:
+        persist_health_snapshot(db, analysis_id, repo.id, commit_sha)
+        status["health_snapshot"] = {"ok": True}
+    except Exception as exc:
+        logger.error(f"Precomputed health snapshot failed (non-fatal): {exc}", exc_info=True)
+        status["health_snapshot"] = {"ok": False, "error": str(exc)[:200]}
+
+    return status
+
+
 def enqueue_analysis_task(background_tasks, analysis_id: str):
     """
     Enqueue an analysis task for asynchronous execution.
@@ -326,6 +555,124 @@ def enqueue_analysis_task(background_tasks, analysis_id: str):
     background_tasks.add_task(run_analysis_task, None, analysis_id)
     logger.info(f"Analysis task {analysis_id} enqueued via BackgroundTasks.")
 
+
+
+def _generate_scan_reports(db, analysis_id, user_id, repo_name, results: dict, repo_an: dict | None, test_suggs: str, pr_number=None):
+    """Generate MD/JSON/CSV/PDF exports and persist Report rows.
+
+    Extracted so BOTH the fresh-scan path and the cached-reuse path produce
+    identical downloadable reports for the scan (the cached path previously
+    created no reports at all).
+    """
+    report_data = {
+        "repo_name": repo_name,
+        "pr_number": pr_number,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "risk_score": results.get("risk_score", 0),
+        "findings": results.get("findings", []),
+        "test_suggestions": test_suggs,
+        "repo_analysis": repo_an,
+        "files_analyzed_log": results.get("files_analyzed_log", []),
+        "scores": results.get("scores", {}),
+    }
+
+    # Include deterministic insight data in reports when available
+    try:
+        from app.models.models import (
+            DependencyFinding, DuplicateCodeFinding, TechnicalDebtFinding,
+            ArchitectureAnalysis, ComplexityFinding,
+        )
+        dep_rows = db.query(DependencyFinding).filter(DependencyFinding.analysis_id == analysis_id).all()
+        if dep_rows:
+            report_data["dependencies"] = {
+                "findings": [{
+                    "package_name": d.package_name, "ecosystem": d.ecosystem,
+                    "resolved_version": d.resolved_version, "version_spec": d.version_spec,
+                    "status": d.status, "severity": d.severity,
+                    "advisory_id": d.advisory_id, "recommended_version": d.recommended_version,
+                } for d in dep_rows],
+                "summary": {
+                    "total": len(dep_rows),
+                    "known_vulnerable": sum(1 for d in dep_rows if d.status == "known_vulnerable"),
+                    "outdated": sum(1 for d in dep_rows if d.status == "outdated"),
+                    "unknown": sum(1 for d in dep_rows if d.status == "unknown"),
+                },
+            }
+        dup_rows = db.query(DuplicateCodeFinding).filter(DuplicateCodeFinding.analysis_id == analysis_id).all()
+        if dup_rows:
+            report_data["duplicates"] = {
+                "findings": [{
+                    "file_a": d.file_a, "start_line_a": d.start_line_a, "end_line_a": d.end_line_a,
+                    "file_b": d.file_b, "start_line_b": d.start_line_b, "end_line_b": d.end_line_b,
+                    "similarity": d.similarity, "duplicated_lines": d.duplicated_lines,
+                } for d in dup_rows],
+            }
+        debt_rows = db.query(TechnicalDebtFinding).filter(TechnicalDebtFinding.analysis_id == analysis_id).all()
+        if debt_rows:
+            report_data["technical_debt"] = {
+                "items": [{
+                    "category": t.category, "severity": t.severity, "title": t.title,
+                    "evidence": t.evidence, "file": t.file, "line_start": t.line_start,
+                    "estimated_effort_hours": t.estimated_effort_hours,
+                } for t in debt_rows],
+                "summary": {
+                    "total_estimated_effort_hours": round(sum(t.estimated_effort_hours or 0 for t in debt_rows), 1),
+                },
+            }
+        arch_row = db.query(ArchitectureAnalysis).filter(
+            ArchitectureAnalysis.analysis_id == analysis_id
+        ).order_by(ArchitectureAnalysis.created_at.desc()).first()
+        if arch_row and isinstance(arch_row.result, dict):
+            report_data["architecture"] = arch_row.result
+        cx_rows = db.query(ComplexityFinding).filter(ComplexityFinding.analysis_id == analysis_id).all()
+        if cx_rows:
+            report_data["complexity"] = {
+                "findings": [{
+                    "file": c.file, "name": c.name, "line_start": c.line_start,
+                    "cyclomatic_complexity": c.cyclomatic_complexity,
+                    "length_lines": c.length_lines, "severity": c.severity,
+                } for c in cx_rows],
+                "summary": {
+                    "total_functions_measured": len(cx_rows),
+                    "reported": len(cx_rows),
+                    "average_complexity": (
+                        round(sum(c.cyclomatic_complexity for c in cx_rows) / len(cx_rows), 2)
+                        if cx_rows else 0.0
+                    ),
+                },
+            }
+    except Exception as insights_report_err:
+        logger.warning(f"Could not include insights in report data: {insights_report_err}")
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    storage_dir = os.path.join(base_dir, "storage")
+    os.makedirs(storage_dir, exist_ok=True)
+
+    md_path = os.path.join(storage_dir, f"report_{analysis_id}.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(generate_markdown_report(report_data))
+    db.add(Report(analysis_id=analysis_id, user_id=user_id, type="Markdown", filepath=md_path))
+
+    json_path = os.path.join(storage_dir, f"report_{analysis_id}.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        f.write(generate_json_report(report_data))
+    db.add(Report(analysis_id=analysis_id, user_id=user_id, type="JSON", filepath=json_path))
+
+    csv_path = os.path.join(storage_dir, f"report_{analysis_id}.csv")
+    with open(csv_path, "w", encoding="utf-8") as f:
+        f.write(generate_csv_report(report_data))
+    db.add(Report(analysis_id=analysis_id, user_id=user_id, type="CSV", filepath=csv_path))
+
+    pdf_path = os.path.join(storage_dir, f"report_{analysis_id}.pdf")
+    try:
+        generate_pdf_report(report_data, pdf_path)
+        db.add(Report(analysis_id=analysis_id, user_id=user_id, type="PDF", filepath=pdf_path))
+        logger.info("Generated PDF report successfully.")
+    except Exception as pdf_err:
+        logger.error(f"Failed to generate PDF report: {pdf_err}", exc_info=True)
+
+    db.commit()
+    logger.info("[SCAN-TIMER] reports persisted for analysis_id=%s", analysis_id)
 
 
 def _run_analysis_impl(self, analysis_id: str):
@@ -425,7 +772,9 @@ def _run_analysis_impl(self, analysis_id: str):
         full_scan = analysis.pull_request_id is None
         cached_payload = None
         cache_key = None
-        if full_scan and not settings.FORCE_GROQ_ANALYSIS:
+        # Test runs use isolated mocked repositories and must exercise the
+        # fresh pipeline rather than reusing a cache row from a prior test.
+        if full_scan and os.getenv("TESTING") != "1":
             try:
                 head = github_service.get_repo_object(repo.name).get_branch(repo.default_branch).commit
                 scan_commit_sha = head.sha
@@ -451,18 +800,81 @@ def _run_analysis_impl(self, analysis_id: str):
             _materialize_cached_result(db, analysis, cached_payload, provider, model_name)
             db.expire(analysis)  # re-bind attributes to the session before further use
             analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+            # PERF FIX: rebuild this scan's insight rows from the analyzer
+            # outputs stored IN the cache payload. The old code called
+            # run_all_insights() here, which re-fetched every file from GitHub
+            # and re-ran all analyzers — an entire second repository analysis
+            # on every cache hit. Persisting from cached results is pure DB
+            # inserts (milliseconds, zero GitHub calls) and gives this scan
+            # its own complete insight rows for the UI.
+            insights_status = None
             try:
-                from app.services.insights_orchestrator import run_all_insights as _run_insights
-                update_progress(analysis_id, 85, "Reusing stored analysis — refreshing repository insights...", status="generating_insights", db=db)
-                _run_insights(db, analysis.id, repo, github_service, commit_sha=reused_commit)
+                update_progress(analysis_id, 85, "Restoring repository insights from stored analysis...", status="generating_insights", db=db)
+                insights_started = time.time()
+                insights_status = _persist_precomputed_insights(
+                    db, analysis_id, repo, cached_payload.get("_fast_scan_precomputed") or {}, reused_commit,
+                )
+                logger.info("[SCAN-TIMER] insights_cached=%.2fs", time.time() - insights_started)
+                try:
+                    existing.result_json = {**cached_payload, "_insights_status": insights_status}
+                    db.commit()
+                except Exception:
+                    db.rollback()
             except Exception as insights_exc:
                 logger.error(f"Insights stage on cached scan failed (non-fatal): {insights_exc}", exc_info=True)
+
+            # Generate downloadable reports for the cached scan too (from the
+            # stored result + the insight rows just persisted).
+            try:
+                update_progress(analysis_id, 90, "Generating export reports...", db=db)
+                _generate_scan_reports(
+                    db, analysis_id, user.id,
+                    repo.name, cached_payload, cached_payload.get("repo_analysis"),
+                    cached_payload.get("test_suggestions", ""),
+                )
+            except Exception as report_exc:
+                logger.error(f"Cached-scan report generation failed (non-fatal): {report_exc}", exc_info=True)
             duration = time.time() - start_time
-            logger.info(f"Cached-scan materialization completed in {duration:.2f}s for analysis_id: {analysis_id}")
+            logger.info(f"[SCAN-TIMER] cached_reuse TOTAL={duration:.2f}s for analysis_id: {analysis_id}")
             update_progress(analysis_id, 100, "Analysis completed (stored result for this exact commit was reused).", db=db)
             db.close()
             return f"Reused stored analysis for commit {reused_commit}"
 
+
+        # ── DUPLICATE-SCAN GUARD ────────────────────────────────────
+        # If the same repository+commit is already being scanned by another
+        # worker, do NOT repeat the expensive work. Wait briefly for the
+        # first scan to persist its cache entry, then reuse it.
+        scan_guard_key = f"{repo.id}:{analysis.commit_sha}"
+        guard_acquired = False
+        if full_scan:
+            with _active_scan_locks:
+                if scan_guard_key in _active_scans:
+                    guard_acquired = False
+                else:
+                    _active_scans.add(scan_guard_key)
+                    guard_acquired = True
+            if not guard_acquired:
+                logger.warning(f"[PERFORMANCE-REGRESSION] duplicate_scan_blocked=true repo={repo.name} commit={str(analysis.commit_sha)[:8]}; attaching to in-flight scan.")
+                # Wait up to 60s for the in-flight scan to finish and store its
+                # result, then try to reuse it instead of re-scanning.
+                for _ in range(12):
+                    time.sleep(5)
+                    try:
+                        db.expire_all()
+                        head = github_service.get_repo_object(repo.name).get_branch(repo.default_branch).commit
+                        ck = build_scan_cache_key(repo.id, head.sha, provider, model_name)
+                        row = db.query(AnalysisResultCache).filter(AnalysisResultCache.cache_key == ck).first()
+                        if row and row.result_json:
+                            _materialize_cached_result(db, analysis, row.result_json, provider, model_name)
+                            update_progress(analysis_id, 100, "Analysis completed (attached to an identical in-flight scan).", db=db)
+                            db.close()
+                            return f"Reused in-flight scan result for commit {head.sha}"
+                    except Exception:
+                        continue
+                # In-flight scan did not finish in time; run a full scan anyway
+                # rather than failing the user's request.
+                logger.warning("Duplicate-scan guard wait elapsed; proceeding with a fresh scan.")
 
         # Setup progress callback helper
         def progress_cb(prog, stat, msg, files_an=0, total_an=0, curr_file=""):
@@ -477,28 +889,41 @@ def _run_analysis_impl(self, analysis_id: str):
                 db=db
             )
 
-        # 3. Execute scan
-        results = None
-        if analysis.pull_request_id:
-            pr = db.query(PullRequest).filter(PullRequest.id == analysis.pull_request_id).first()
-            update_progress(analysis_id, 30, f"Fetching PR #{pr.number} diff content...", status="scanning", db=db)
-            logger.info(f"Starting Pull Request scan on repository: {repo.name}, PR: #{pr.number}")
-            results = review_pull_request(
-                repo_name=repo.name,
-                pr_number=pr.number,
-                github_service=github_service,
-                client=llm_client,
-                progress_callback=progress_cb
-            )
-        else:
-            update_progress(analysis_id, 30, "Fetching repository files recursively...", status="scanning", db=db)
-            logger.info(f"Starting full repository scan on: {repo.name}")
-            results = review_entire_repository(
-                repo_name=repo.name,
-                github_service=github_service,
-                client=llm_client,
-                progress_callback=progress_cb
-            )
+        # 3. Execute scan (guard always released in finally, even on failure)
+        try:
+            review_started = time.time()
+            results = None
+            if analysis.pull_request_id:
+                pr = db.query(PullRequest).filter(PullRequest.id == analysis.pull_request_id).first()
+                update_progress(analysis_id, 30, f"Fetching PR #{pr.number} diff content...", status="scanning", db=db)
+                logger.info(f"Starting Pull Request scan on repository: {repo.name}, PR: #{pr.number}")
+                results = review_pull_request(
+                    repo_name=repo.name,
+                    pr_number=pr.number,
+                    github_service=github_service,
+                    client=llm_client,
+                    progress_callback=progress_cb
+                )
+            else:
+                update_progress(analysis_id, 30, "Fetching repository files...", status="scanning", db=db)
+                logger.info(f"Starting full repository scan on: {repo.name}")
+                results = review_entire_repository(
+                    repo_name=repo.name,
+                    github_service=github_service,
+                    client=llm_client,
+                    progress_callback=progress_cb
+                )
+        finally:
+            if full_scan and guard_acquired:
+                with _active_scan_locks:
+                    _active_scans.discard(scan_guard_key)
+        logger.info(
+            "Scan stage completed: review duration=%.2fs files=%d requests=%d cache_hits=%d",
+            time.time() - review_started,
+            results.get("files_analyzed_count", 0),
+            results.get("groq_requests_made", 0),
+            results.get("cached_results_used", 0),
+        )
             # The exact commit analyzed is resolved inside review_entire_repository
             # and returned as `head_sha`; the insights stage re-uses it so the
             # health snapshot records the true snapshot SHA (no second GitHub
@@ -669,6 +1094,8 @@ def _run_analysis_impl(self, analysis_id: str):
         # complexity, architecture, technical debt, health snapshot).
         # Runs ONLY for full repository scans. Each insight is non-fatal:
         # a failure in any insight never fails the scan itself.
+        insights_status = None
+        insights_started = time.time()
         if not analysis.pull_request_id:
             try:
                 update_progress(analysis_id, 85, "Computing repository insights...", status="generating_insights", db=db)
@@ -676,156 +1103,57 @@ def _run_analysis_impl(self, analysis_id: str):
                 # scan start) — re-resolving here could race with a new push
                 # and record a snapshot SHA that was never scanned.
                 scan_head_sha = results.get("head_sha") or analysis.commit_sha
-                insights_status = run_all_insights(db, analysis_id, repo, github_service, commit_sha=scan_head_sha)
-                logger.info(f"Repository insights completed: {insights_status}")
+
+                # ── FAST SCAN OPTIMIZATION ──────────────────────────────────
+                # If the fast scan pipeline pre-computed all insights (security,
+                # complexity, duplicates, dependencies, architecture), persist
+                # them directly instead of re-running the full insights pipeline.
+                precomputed = results.get("_fast_scan_precomputed")
+                if precomputed:
+                    insights_status = _persist_precomputed_insights(
+                        db, analysis_id, repo, precomputed, scan_head_sha,
+                    )
+                else:
+                    insights_status = run_all_insights(db, analysis_id, repo, github_service, commit_sha=scan_head_sha)
             except Exception as insights_exc:
                 logger.error(f"Repository insights failed (non-fatal): {insights_exc}", exc_info=True)
+            logger.info("[SCAN-TIMER] insights=%.2fs", time.time() - insights_started)
 
             # ── STORE the fresh result for future deterministic reuse ──
             try:
+                # Keep the precomputed analyzer outputs and per-insight status in
+                # the cache payload so a cache hit can restore insights WITHOUT
+                # re-fetching/re-analyzing anything (see cached path above).
+                cache_results = dict(results)
+                cache_results["_insights_status"] = insights_status
                 _store_result_cache(
                     db, repo, analysis.commit_sha or results.get("head_sha"),
-                    provider, model_name, results,
+                    provider, model_name, cache_results,
                 )
             except Exception as store_err:
                 logger.warning(f"Failed to store result cache entry (non-fatal): {store_err}")
 
         # 5. Generate and save exports
         update_progress(analysis_id, 90, "Generating export reports...", db=db)
-
-        # Format the data parameter correctly for report generators
-        report_data = {
-            "repo_name": repo.name,
-            "pr_number": pr.number if analysis.pull_request_id else None,
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            "risk_score": analysis.risk_score,
-            "findings": results.get("findings", []),
-            "test_suggestions": test_suggs,
-            "repo_analysis": repo_an,
-            "files_analyzed_log": results.get("files_analyzed_log", []),
-            "scores": results.get("scores", {})
-        }
-
-        # Base storage path
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        storage_dir = os.path.join(base_dir, "storage")
-        logger.info(f"Persisting reports to shared storage path: {storage_dir}")
-        os.makedirs(storage_dir, exist_ok=True)
-
-        # Include deterministic insight data in reports when available
-        try:
-            from app.models.models import (
-                DependencyFinding, DuplicateCodeFinding, TechnicalDebtFinding,
-                ArchitectureAnalysis, ComplexityFinding,
-            )
-            dep_rows = db.query(DependencyFinding).filter(DependencyFinding.analysis_id == analysis_id).all()
-            if dep_rows:
-                report_data["dependencies"] = {
-                    "findings": [{
-                        "package_name": d.package_name, "ecosystem": d.ecosystem,
-                        "resolved_version": d.resolved_version, "version_spec": d.version_spec,
-                        "status": d.status, "severity": d.severity,
-                        "advisory_id": d.advisory_id, "recommended_version": d.recommended_version,
-                    } for d in dep_rows],
-                    "summary": {
-                        "total": len(dep_rows),
-                        "known_vulnerable": sum(1 for d in dep_rows if d.status == "known_vulnerable"),
-                        "outdated": sum(1 for d in dep_rows if d.status == "outdated"),
-                        "unknown": sum(1 for d in dep_rows if d.status == "unknown"),
-                    },
-                }
-            dup_rows = db.query(DuplicateCodeFinding).filter(DuplicateCodeFinding.analysis_id == analysis_id).all()
-            if dup_rows:
-                report_data["duplicates"] = {
-                    "findings": [{
-                        "file_a": d.file_a, "start_line_a": d.start_line_a, "end_line_a": d.end_line_a,
-                        "file_b": d.file_b, "start_line_b": d.start_line_b, "end_line_b": d.end_line_b,
-                        "similarity": d.similarity, "duplicated_lines": d.duplicated_lines,
-                    } for d in dup_rows],
-                }
-            debt_rows = db.query(TechnicalDebtFinding).filter(TechnicalDebtFinding.analysis_id == analysis_id).all()
-            if debt_rows:
-                report_data["technical_debt"] = {
-                    "items": [{
-                        "category": t.category, "severity": t.severity, "title": t.title,
-                        "evidence": t.evidence, "file": t.file, "line_start": t.line_start,
-                        "estimated_effort_hours": t.estimated_effort_hours,
-                    } for t in debt_rows],
-                    "summary": {
-                        "total_estimated_effort_hours": round(sum(t.estimated_effort_hours or 0 for t in debt_rows), 1),
-                    },
-                }
-            arch_row = db.query(ArchitectureAnalysis).filter(
-                ArchitectureAnalysis.analysis_id == analysis_id
-            ).order_by(ArchitectureAnalysis.created_at.desc()).first()
-            if arch_row and isinstance(arch_row.result, dict):
-                report_data["architecture"] = arch_row.result
-            cx_rows = db.query(ComplexityFinding).filter(ComplexityFinding.analysis_id == analysis_id).all()
-            if cx_rows:
-                report_data["complexity"] = {
-                    "findings": [{
-                        "file": c.file, "name": c.name, "line_start": c.line_start,
-                        "cyclomatic_complexity": c.cyclomatic_complexity,
-                        "length_lines": c.length_lines, "severity": c.severity,
-                    } for c in cx_rows],
-                    "summary": {
-                        "total_functions_measured": len(cx_rows),
-                        "reported": len(cx_rows),
-                        "average_complexity": (
-                            round(sum(c.cyclomatic_complexity for c in cx_rows) / len(cx_rows), 2)
-                            if cx_rows else 0.0
-                        ),
-                    },
-                }
-        except Exception as insights_report_err:
-            logger.warning(f"Could not include insights in report data: {insights_report_err}")
-
-        # Generate Markdown
-        md_content = generate_markdown_report(report_data)
-        md_path = os.path.join(storage_dir, f"report_{analysis_id}.md")
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(md_content)
-        db.add(Report(analysis_id=analysis_id, user_id=user.id, type="Markdown", filepath=md_path))
-
-        # Generate JSON
-        json_content = generate_json_report(report_data)
-        json_path = os.path.join(storage_dir, f"report_{analysis_id}.json")
-        with open(json_path, "w", encoding="utf-8") as f:
-            f.write(json_content)
-        db.add(Report(analysis_id=analysis_id, user_id=user.id, type="JSON", filepath=json_path))
-
-        # Generate CSV
-        csv_content = generate_csv_report(report_data)
-        csv_path = os.path.join(storage_dir, f"report_{analysis_id}.csv")
-        with open(csv_path, "w", encoding="utf-8") as f:
-            f.write(csv_content)
-        db.add(Report(analysis_id=analysis_id, user_id=user.id, type="CSV", filepath=csv_path))
-
-        # Generate PDF
-        pdf_path = os.path.join(storage_dir, f"report_{analysis_id}.pdf")
-        try:
-            generate_pdf_report(report_data, pdf_path)
-            db.add(Report(analysis_id=analysis_id, user_id=user.id, type="PDF", filepath=pdf_path))
-            logger.info("Generated PDF report successfully.")
-        except Exception as pdf_err:
-            logger.error(f"Failed to generate PDF report: {pdf_err}", exc_info=True)
-
-        db.commit()
+        _generate_scan_reports(
+            db, analysis_id, user.id, repo.name, results, repo_an, test_suggs,
+            pr_number=(pr.number if analysis.pull_request_id else None),
+        )
 
         duration = time.time() - start_time
+        logger.info(f"[SCAN-TIMER] TOTAL={duration:.2f}s (task complete) analysis_id={analysis_id}")
         logger.info(f"Celery analysis task completed successfully in {duration:.2f}s for analysis_id: {analysis_id}")
         update_progress(analysis_id, 100, "Analysis completed successfully!", db=db)
 
     except Exception as exc:
-        # check if running in Celery mode (self is a real task) or background_tasks fallback (self is None)
+        # PERF FIX: no Celery-level retries. Previously autoretry re-ran the
+        # ENTIRE scan (clone + fetch + analysis + LLM) up to 3 extra times with
+        # 10–40s backoffs — the single biggest cause of 5–15 minute scans.
+        # A failed scan now fails exactly once, quickly, with a clear message.
         is_celery_mode = self is not None and hasattr(self, 'request') and self.request is not None
 
-        if is_celery_mode and self.request.retries < self.max_retries and not os.getenv("TESTING") and not getattr(self.request, "called_directly", False):
-            logger.info(f"Task run_analysis_task failed. Retrying (attempt {self.request.retries + 1}/{self.max_retries})...")
-            db.close()
-            raise self.retry(exc=exc, countdown=10 * (2 ** self.request.retries))
-
         duration = time.time() - start_time
+        logger.error(f"[SCAN-TIMER] failed_after={duration:.2f}s error={exc}")
         logger.error(f"Analysis task failed after {duration:.2f}s: {exc}", exc_info=True)
 
         # Convert common errors to user-friendly messages

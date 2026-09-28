@@ -267,7 +267,17 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
   useEffect(() => {
     if (explorerData) {
-      setExplorerTree(explorerData);
+      // The explorer endpoint returns { tree, ref, branch, snapshot_pinned,
+      // truncated }. Unwrap the `tree` array — storing the envelope object
+      // made `explorerTree.length > 0` always false, so the file list never
+      // rendered ("No files indexed") and 'Open in Editor' jumps showed
+      // nothing. The fallback keeps any previously cached array response valid.
+      const tree = Array.isArray(explorerData)
+        ? explorerData
+        : Array.isArray(explorerData.tree)
+          ? explorerData.tree
+          : [];
+      setExplorerTree(tree);
     }
   }, [explorerData]);
 
@@ -446,17 +456,6 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
     };
   }, [showProgress]);
 
-  const getEstimatedRemaining = () => {
-    if (progress <= 0 || progress >= 100) return "Calculating...";
-    const totalEst = (elapsedTime / progress) * 100;
-    const remaining = Math.round(totalEst - elapsedTime);
-    if (remaining <= 0) return "Almost done...";
-    
-    const m = Math.floor(remaining / 60);
-    const s = remaining % 60;
-    return m > 0 ? `${m}m ${s}s` : `${s}s`;
-  };
-
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60);
     const s = secs % 60;
@@ -493,6 +492,7 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
 
   const [scanToDelete, setScanToDelete] = useState<string | null>(null);
   const [showDeleteAllModal, setShowDeleteAllModal] = useState(false);
+  const scanRequestInFlight = useRef(false);
 
   // Clean up polling/WebSocket on unmount or repo change
   useEffect(() => {
@@ -519,7 +519,8 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
   };
 
   const startScan = async () => {
-    if (!activeRepo) return;
+    if (!activeRepo || scanRequestInFlight.current) return;
+    scanRequestInFlight.current = true;
     try {
       resetProgress();
       await triggerAnalysis(activeRepo.id);
@@ -528,6 +529,8 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
       // Error state is surfaced via the analysisError banner below —
       // the scanning UI must never remain stuck.
       toast.error(err?.response?.data?.detail || err?.message || "Scan failed. Please try again.");
+    } finally {
+      scanRequestInFlight.current = false;
     }
   };
 
@@ -619,18 +622,6 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
             </div>
 
             <div className="flex items-center gap-3">
-              {/* NEXT → RepoLens project features (Insights) for THIS
-                  repository: analysis, security, quality, tests, dependencies,
-                  duplicates, complexity, tech debt, architecture, PR review,
-                  commits, reports and AI chat — all repository-scoped tabs. */}
-              <button
-                onClick={() => setActiveTab("insights")}
-                className="btn-secondary flex items-center gap-2"
-                title="Open project features — Insights, Deep Insights, Reports and more"
-              >
-                Next
-                <ChevronRight className="w-4 h-4" />
-              </button>
               <button
                 onClick={() => setShowDisconnectModal(true)}
                 disabled={showProgress || actionLoading}
@@ -735,10 +726,11 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
             <div>
               <span className="metric-label block text-[9px] tracking-wider">Files Scanned</span>
               <span className="text-zinc-600 font-semibold dark:text-zinc-300">
-                {progressDetailed?.files_analyzed || 0}
-                {progressDetailed?.total_files && progressDetailed.total_files > 0
-                  ? ` / ${progressDetailed.total_files}`
-                  : ""}
+                {progressDetailed && progressDetailed.total_files > 0
+                  ? `${progressDetailed.files_analyzed} / ${progressDetailed.total_files}`
+                  : (activeAnalysis?.files_analyzed_count || 0) > 0
+                    ? activeAnalysis!.files_analyzed_count
+                    : "—"}
               </span>
             </div>
             <div>
@@ -746,8 +738,8 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
               <span className="text-zinc-600 font-semibold flex items-center gap-1 dark:text-zinc-300"><Clock className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" />{formatTime(elapsedTime)}</span>
             </div>
             <div>
-              <span className="metric-label block text-[9px] tracking-wider">Est. Remaining</span>
-              <span className="text-zinc-600 font-semibold flex items-center gap-1 dark:text-zinc-300"><RefreshCw className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400 animate-spin" style={{ animationDuration: '4s' }} />{getEstimatedRemaining()}</span>
+              <span className="metric-label block text-[9px] tracking-wider">Updates</span>
+              <span className="text-zinc-600 font-semibold flex items-center gap-1 dark:text-zinc-300"><RefreshCw className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400 animate-spin" style={{ animationDuration: '4s' }} />Live</span>
             </div>
           </div>
           

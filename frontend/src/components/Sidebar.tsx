@@ -105,12 +105,24 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             onClick={toggleTheme}
             className="w-full flex items-center justify-between rounded-2xl border border-zinc-200/60 bg-zinc-50 px-3 py-2.5 text-left transition-colors hover:bg-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
             aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            aria-pressed={theme === "dark"}
           >
             <span className="flex items-center gap-2 text-xs font-bold text-zinc-700">
               {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-              {!collapsed && (theme === "dark" ? "Light mode" : "Dark mode")}
+              {!collapsed && (theme === "dark" ? "Dark" : "Light")}
             </span>
-            {!collapsed && <span className="text-[10px] uppercase tracking-wider text-zinc-500">Toggle</span>}
+            <span
+              className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                theme === "dark" ? "bg-accent-blue" : "bg-zinc-300"
+              }`}
+              aria-hidden="true"
+            >
+              <span
+                className={`h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                  theme === "dark" ? "translate-x-4" : "translate-x-0.5"
+                }`}
+              />
+            </span>
           </button>
         </div>
 
