@@ -43,7 +43,7 @@ function clearRepoHash() {
 
 export const App: React.FC = () => {
   const { token, user, initialize, loading, justLoggedIn, clearJustLoggedIn } = useAuthStore();
-  const { activeRepo, activePr, setActiveRepo, setActivePr, hydrateActiveRepo } = useRepositoryStore();
+  const { activeRepo, activePr, setActiveRepo, setActivePr, hydrateActiveRepo, repoDetailPage } = useRepositoryStore();
 
   // Navigation tabs
   const [activeTab, setActiveTab] = useState("repositories");
@@ -416,36 +416,62 @@ export const App: React.FC = () => {
         findingContext={(() => {
           const { activeAnalysis, securityFindings, codeSmells } = useAnalysisStore.getState();
           const { activeRepo } = useRepositoryStore.getState();
+          const currentRepoPage = repoDetailPage;
 
-          if (activeTab === "repo-detail" && activeRepo && activeAnalysis) {
+          if (activeTab === "repo-detail" && activeRepo) {
+            if (activeAnalysis) {
+              // Scan results available → ground "explain this page" in the
+              // actual scan data plus the exact sub-tab the user is viewing.
+              return {
+                type: "repository_scan",
+                repository: activeRepo.name,
+                repository_id: activeRepo.id,
+                risk_score: activeAnalysis.risk_score,
+                status: activeAnalysis.status,
+                repo_page: currentRepoPage,
+                security_findings_count: securityFindings.length,
+                code_smells_count: codeSmells.length,
+                security_findings: securityFindings.slice(0, 5).map(f => ({
+                  issue: f.issue,
+                  severity: f.severity,
+                  file: f.file,
+                  line: f.line,
+                  suggestion: f.suggestion,
+                })),
+                code_smells: codeSmells.slice(0, 5).map(s => ({
+                  issue: s.issue,
+                  severity: s.severity,
+                  file: s.file,
+                  line: s.line,
+                })),
+              };
+            }
+            // Repository open but no scan loaded yet (never scanned, scan
+            // running, or refresh before details load) → still send the page
+            // identity + repository id. The backend injects the latest scan
+            // from the DB when one exists; otherwise it explains the page
+            // without inventing data.
             return {
-              type: "repository_scan",
-              repository: activeRepo.name,
-              risk_score: activeAnalysis.risk_score,
-              status: activeAnalysis.status,
-              security_findings_count: securityFindings.length,
-              code_smells_count: codeSmells.length,
-              security_findings: securityFindings.slice(0, 5).map(f => ({
-                issue: f.issue,
-                severity: f.severity,
-                file: f.file,
-                line: f.line,
-                suggestion: f.suggestion,
-              })),
-              code_smells: codeSmells.slice(0, 5).map(s => ({
-                issue: s.issue,
-                severity: s.severity,
-                file: s.file,
-                line: s.line,
-              })),
+              type: "repository_page",
+              repository: activeRepo.name || "this repository",
+              repository_id: activeRepo.id,
+              repo_page: currentRepoPage,
+              message: "The user has this repository open, but no scan results are loaded yet — explain the current tab and what it will show once a scan has run.",
             };
           }
-          
 
           if (activeTab === "settings") {
+            // Real configured-provider list from the user flags (same source
+            // as Settings) — so "explain this page" reflects the actual state.
+            const u = (user || {}) as Record<string, any>;
+            const configured: string[] = [];
+            for (const p of ["groq", "openai", "claude", "gemini", "openrouter"]) {
+              if (u[`has_${p}_api_key`]) configured.push(p.charAt(0).toUpperCase() + p.slice(1));
+            }
+            const patConfigured = !!u.has_github_pat;
             return {
               type: "settings",
-              message: "The user is configuring API keys for LLM providers (Groq, OpenAI, Claude, Gemini, OpenRouter) and GitHub PAT. The user can test connections, set defaults, and manage encryption.",
+              message: `The user is on the Settings page configuring API keys for LLM providers (Groq, OpenAI, Claude, Gemini, OpenRouter) and their GitHub PAT. Configured providers right now: ${configured.length ? configured.join(", ") : "none yet"}. GitHub PAT: ${patConfigured ? "configured" : "not configured yet"}. Never repeat or expose any key material — keys are stored AES-256 encrypted.`,
             };
           }
           

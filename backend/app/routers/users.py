@@ -896,6 +896,8 @@ async def get_dashboard_metrics(
             "health_score": latest_health,
             "risk_score": latest_analysis.risk_score,
             "files_analyzed": latest_analysis.files_analyzed_count or 0,
+            "scan_duration_seconds": latest_analysis.scan_duration_seconds,
+            "latency_seconds": latest_analysis.latency_seconds,
             "attention": {
                 "critical_security": sec_counts["Critical"],
                 "high_security": sec_counts["High"],

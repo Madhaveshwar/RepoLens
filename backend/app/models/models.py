@@ -61,6 +61,10 @@ class Repository(Base):
     health_snapshots = relationship("RepositoryHealthSnapshot", cascade="all, delete-orphan")
     pr_reviews = relationship("PullRequestReview", cascade="all, delete-orphan")
     commit_analyses = relationship("CommitAnalysis", cascade="all, delete-orphan")
+    # Scan result cache rows belong to their repository — without this cascade
+    # a repository delete fails on PostgreSQL (FK violation) or leaves orphan
+    # cache rows behind that keep stale scan results alive.
+    result_cache_entries = relationship("AnalysisResultCache", cascade="all, delete-orphan")
 
 class PullRequest(Base):
     __tablename__ = "pull_requests"

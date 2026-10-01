@@ -22,42 +22,36 @@ interface ChatProps {
 
 const SUGGESTED_QUESTIONS: Record<string, string[]> = {
   dashboard: [
+    "Explain this page",
     "Explain my health score",
-    "How do I improve my security score?",
     "What's the most critical issue?",
     "What do the severity colors mean?"
   ],
-  repository: [
-    "Summarize this scan",
-    "How do I fix these findings?",
-    "What's the risk score mean?",
-    "Explain this vulnerability"
-  ],
   repositories: [
+    "Explain this page",
     "Summarize this scan",
-    "How do I fix these findings?",
     "What's the risk score mean?",
-    "Explain this vulnerability"
+    "How do I fix these findings?"
   ],
   settings: [
+    "Explain this page",
     "Which LLM provider should I use?",
     "How are my keys encrypted?",
-    "How do I get a Groq API key?",
     "Why use a GitHub PAT?"
   ],
   "pr-review": [
+    "Explain this page",
     "Summarize this PR",
     "What are the riskiest changes?",
-    "Should I approve this PR?",
-    "Explain this finding"
+    "Should I approve this PR?"
   ],
 };
 
 const DEFAULT_QUESTIONS = [
+  "Explain this page",
   "What can you help me with?",
   "How do scans work?",
-  "Give me best practices",
-  "Explain beginner mode"
+  "Give me best practices"
 ];
 
 
@@ -166,6 +160,11 @@ export const ChatBot: React.FC<ChatProps> = ({ currentPage, findingContext }) =>
           message: trimmed,
           current_page: currentPage || null,
           finding_context: findingContext || null,
+          // Repository-scoped chat: sent ONLY when the user has explicitly
+          // opened a repository. Lets the backend inject the latest DB scan
+          // for THIS repository so "Explain this page" works before/after a
+          // scan and right after a refresh (frontend store may be empty).
+          repository_id: findingContext && (findingContext as any).repository_id ? (findingContext as any).repository_id : null,
           beginner_mode: beginnerMode,
           conversation_history: history,
         }),

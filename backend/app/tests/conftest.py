@@ -6,6 +6,13 @@ os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///test.db"
 os.environ["SYNC_DATABASE_URL"] = "sqlite:///test.db"
 os.environ["REDIS_URL"] = "redis://localhost:6379/0"
 os.environ["TESTING"] = "1"
+# Lower argon2's runtime working buffer in tests: the suite runs alongside
+# dev servers/browsers on memory-tight machines and the 64 MiB per-hash
+# allocation intermittently failed (VirtualAlloc → "Memory allocation error:
+# hash=None"), breaking register/login with 500s. Policy constant stays at
+# 64 MiB (asserted by test_requirements_fixes.py); only the test-process
+# allocation is reduced.
+os.environ["ARGON2_MEMORY_COST_KIB"] = "8192"
 
 import pytest
 import asyncio

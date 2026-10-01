@@ -27,6 +27,7 @@ interface OverviewData {
     risk_score: number;
     model_name: string | null;
     scan_duration_seconds: number | null;
+    latency_seconds?: number | null;
   };
   counts?: {
     security_issues: number;
@@ -196,7 +197,11 @@ export const RepositoryOverviewPanel: React.FC<{ repoId: string }> = ({ repoId }
         <div className="glass p-4 rounded-2xl text-center">
           <p className="metric-label text-[10px]">Scan Duration</p>
           <h4 className="text-2xl font-bold mt-1.5 text-zinc-900 dark:text-zinc-100">
-            {scan.scan_duration_seconds ? `${scan.scan_duration_seconds}s` : "Not available"}
+            {(scan.scan_duration_seconds ?? 0) > 0
+              ? `${scan.scan_duration_seconds}s`
+              : (scan.latency_seconds ?? 0) > 0
+                ? `${scan.latency_seconds}s`
+                : "Not available"}
           </h4>
         </div>
       </div>

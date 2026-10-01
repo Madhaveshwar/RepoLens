@@ -169,7 +169,7 @@ const ScanRequiredEmptyState: React.FC<{ icon?: React.ReactNode; message?: strin
 );
 
 export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSelectPr }) => {
-  const { activeRepo, prs } = useRepositoryStore();
+  const { activeRepo, prs, setRepoDetailPage } = useRepositoryStore();
   const { user } = useAuthStore();
   const hasLlmKey = user ? Boolean(
     user.has_groq_api_key || user.has_openai_api_key ||
@@ -185,6 +185,14 @@ export const RepositoryDetail: React.FC<RepositoryDetailProps> = ({ onBack, onSe
   const scanFailed = !!activeAnalysis && activeAnalysis.status === "failed";
 
   const [activeTab, setActiveTab] = useState<RepoTabId>(() => readTabFromHash(activeRepo?.id));
+
+  // Publish the current sub-tab globally so the AI Assistant's "Explain this
+  // page" answers describe the exact view the user is on (overview, security,
+  // quality, ...) with that tab's real data.
+  useEffect(() => {
+    setRepoDetailPage(activeTab);
+    return () => setRepoDetailPage(null);
+  }, [activeTab, setRepoDetailPage]);
 
   // Keep the URL hash in sync so refresh/deep-links restore the active tab.
   useEffect(() => {

@@ -38,6 +38,9 @@ interface RepositoryState {
   activePr: PullRequest | null;
   loading: boolean;
   error: string | null;
+  /** Current sub-tab inside RepositoryDetail (overview/security/quality/...).
+   *  Lets global components (AI Assistant) know which page the user is on. */
+  repoDetailPage: string | null;
 
   fetchRepositories: () => Promise<void>;
   connectRepository: (url: string) => Promise<Repository>;
@@ -49,6 +52,7 @@ interface RepositoryState {
   setActivePr: (pr: PullRequest | null) => void;
   deleteRepository: (id: string) => Promise<void>;
   disconnectRepository: (id: string) => Promise<void>;
+  setRepoDetailPage: (page: string | null) => void;
 }
 
 export const useRepositoryStore = create<RepositoryState>((set) => ({
@@ -58,6 +62,7 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
   activePr: null,
   loading: false,
   error: null,
+  repoDetailPage: null,
 
   fetchRepositories: async () => {
     set({ loading: true });
@@ -99,7 +104,7 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
     // so switching from repository A to B cannot leak findings, analyses or
     // PRs across repositories (no cross-contamination).
     useAnalysisStore.getState().resetAnalysisState();
-    set({ activeRepo: repo, prs: [], activePr: null });
+    set({ activeRepo: repo, prs: [], activePr: null, repoDetailPage: repo ? "overview" : null });
   },
 
   hydrateActiveRepo: (repo) => set((state) => ({
@@ -123,6 +128,10 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
 
   setActivePr: (activePr) => set({ activePr }),
 
+  /** Track which RepositoryDetail sub-tab the user is viewing so the AI
+   *  Assistant can explain the CURRENT page. */
+  setRepoDetailPage: (page) => set({ repoDetailPage: page }),
+
   deleteRepository: async (id) => {
     set({ loading: true });
     try {
@@ -131,6 +140,7 @@ export const useRepositoryStore = create<RepositoryState>((set) => ({
       set((state) => ({
         repositories: state.repositories.filter((r) => r.id !== id),
         activeRepo: state.activeRepo?.id === id ? null : state.activeRepo,
+        repoDetailPage: state.activeRepo?.id === id ? null : state.repoDetailPage,
         error: null
       }));
       // ... AND sync the React Query cache, otherwise remounts may

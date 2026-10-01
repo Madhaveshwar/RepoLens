@@ -229,6 +229,11 @@ async def get_repository_overview(
             "risk_score": analysis.risk_score,
             "model_name": analysis.model_name,
             "scan_duration_seconds": analysis.scan_duration_seconds,
+            # Cached scans return early and leave scan_duration_seconds at 0;
+            # latency_seconds carries the measured review duration of the
+            # analysis whose results are being shown (hero uses the same
+            # fallback) so the tile never shows a false "Not available".
+            "latency_seconds": analysis.latency_seconds,
         },
         "counts": {
             "security_issues": len(sec_rows),

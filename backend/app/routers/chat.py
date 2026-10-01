@@ -37,6 +37,9 @@ class ChatRequest(BaseModel):
     # Repository-state rule: chat context is REPOSITORY-SPECIFIC. The frontend
     # sends this ONLY when the user has explicitly opened a repository. When
     # it is absent, no repository data is injected into the conversation.
+    # (Read by _load_latest_scan_context to inject server-side scan data so
+    # "explain this page" / "summarize this scan" work even when the frontend
+    # store has not loaded findings yet — e.g. before or right after a scan.)
     repository_id: Optional[str] = None
     beginner_mode: bool = False
     conversation_history: Optional[list[dict[str, str]]] = None
@@ -59,6 +62,7 @@ Your role is to help users understand:
 
 **Grounding rules (highest priority):**
 - When scan context is provided, answer about THAT repository using the actual repository name, file paths, line numbers, finding titles, severities and code snippets from the context. Never invent findings, files, or numbers.
+- When the user asks to "explain this page", "what is this page?", "what am I looking at?" or similar, explain the CURRENT page from the Current Context: what the page shows and what the user can do there. If scan context for the current page is available, ground the explanation in its actual data (repository name, scores, finding counts, top findings with files/severities). If no scan context is available, explain what the page is for and what it will display once a scan has run — never invent scores, findings, or repositories.
 - When asked "why is this issue?" / "what does this finding mean?" / "how can I fix this?" — explain THAT specific finding directly, not a generic tutorial.
 - If NO repository scan context is available and the question is about a specific repository's code/architecture/findings, do NOT invent a repository. Say the repository has not been scanned yet and suggest running a scan first — UNLESS the question is a general knowledge question (e.g. "what is architecture analysis?"), which you answer normally.
 - If the repository scan context does not contain the information needed for the answer, say: "I couldn't find enough evidence in the scanned repository to answer that accurately." Do NOT guess or fill gaps with plausible-sounding details.
@@ -131,7 +135,8 @@ def _resolve_llm_key(current_user: User) -> tuple[str, str]:
 # user. No repository selected → no repository data in the conversation.
 
 async def _load_latest_scan_context(
-    db: AsyncSession, user_id, repository_id: Optional[str] = None
+    db: AsyncSession, user_id, repository_id: Optional[str] = None,
+    repo_page: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Load a repository's most recent completed scan with its findings.
 
@@ -226,6 +231,9 @@ async def _load_latest_scan_context(
             "model_name": analysis.model_name,
             "files_analyzed_count": analysis.files_analyzed_count,
             "health_score": None,
+            # Carry the repo sub-tab through so _build_context_prompt can name
+            # the exact page (Overview / Security / Quality / ...) the user is on.
+            "repo_page": repo_page,
             "security_findings_count": sec_total,
             "code_smells_count": smell_total,
             "security_findings": sec_findings,
@@ -314,11 +322,40 @@ def _build_context_prompt(
     if finding_context:
         finding_type = finding_context.get("type", "unknown")
 
+        # Repository sub-page label: repo-detail carries the actual sub-tab so
+        # "explain this page" can describe the Overview / Security / Quality /
+        # Tests / Insights / Explorer / PRs / Deep Analysis view the user is
+        # actually looking at — not a generic repository page description.
+        repo_page = finding_context.get("repo_page")
+        if finding_type == "repository_scan" or finding_type == "repository_page" or repo_page:
+            repo_page_guides = {
+                "overview": "the Repository Dashboard (Overview tab) — the health score, risk score, latest-scan summary tile, metric tiles (security findings, code quality, scan duration) and the Repository Insights overview panel",
+                "explorer": "the Code Explorer tab — a browsable file tree of the repository with in-browser file contents and a 'suggest tests' action per file",
+                "prs": "the Pull Requests tab — the repository's open PRs with quick access to AI PR review",
+                "security": "the Security Findings tab — each security issue with its severity, affected file/line, evidence and a suggested fix",
+                "quality": "the Code Quality tab — code smells with severity, file/line and suggestions",
+                "tests": "the Generated Tests tab — AI-suggested unit test cases derived from the scan findings",
+                "insights": "the Insights tab — health trend over time, dependencies, duplicated code, technical debt, architecture analysis and complexity panels",
+                "deep": "the Deep Analysis tab — PR review, commit analysis and other deep-insight tools",
+            }
+            guide = repo_page_guides.get(str(repo_page), "")
+            if guide:
+                parts.append(f"**Current page:** The user is viewing {guide}.")
+
         if finding_type == "repository_scan":
             # Full scan context sent by the frontend — format it completely so
             # the assistant can actually summarize and answer questions about it.
             parts.append("\n**Current repository scan context:**")
             parts.extend(_format_scan_context(finding_context))
+        elif finding_type == "repository_page":
+            # Repository open but no scan results available yet. Name the repo
+            # and the tab so "explain this page" still describes the actual
+            # page — and make the no-scan state explicit so the model does not
+            # invent scores or findings.
+            repo_name = finding_context.get("repository", "this repository")
+            parts.append(f"\n**Current page context:** The user has repository '{repo_name}' open, but no scan has been completed for it yet (or results are not loaded).")
+            if finding_context.get("message"):
+                parts.append(f"- {finding_context['message']}")
         elif finding_context.get("message"):
             parts.append(f"\n**Page context:** {finding_context['message']}")
         else:
@@ -357,48 +394,48 @@ def _build_context_prompt(
 
 PAGE_SUGGESTIONS: dict[str, list[str]] = {
     "dashboard": [
+        "Explain this page",
         "Explain my health score",
         "What do the severity colors mean?",
-        "How do I improve my security score?",
         "What's the most critical issue?"
     ],
     "repository": [
+        "Explain this page",
         "Summarize this scan",
         "What's the risk score mean?",
-        "How do I fix these findings?",
-        "Explain this vulnerability"
+        "How do I fix these findings?"
     ],
     "repositories": [
+        "Explain this page",
         "Summarize this scan",
         "What's the risk score mean?",
-        "How do I fix these findings?",
-        "Explain this vulnerability"
+        "How do I fix these findings?"
     ],
     "local-review": [
+        "Explain this page",
         "Explain this code",
         "Is this code secure?",
-        "How can I improve performance?",
         "Suggest tests for this code"
     ],
     "settings": [
+        "Explain this page",
         "Which LLM provider should I use?",
         "How are my keys stored?",
-        "How do I get a Groq API key?",
         "Why use a GitHub PAT?"
     ],
     "pr-review": [
+        "Explain this page",
         "Summarize this PR",
         "What are the riskiest changes?",
-        "Should I approve this PR?",
-        "Explain this finding"
+        "Should I approve this PR?"
     ],
 }
 
 DEFAULT_SUGGESTIONS = [
+    "Explain this page",
     "What can you help me with?",
     "How do scans work?",
-    "Give me best practices",
-    "Explain beginner mode"
+    "Give me best practices"
 ]
 
 
@@ -423,7 +460,8 @@ async def chat_ask(
     # one). No repository selected → no repository data in the conversation.
     has_scan_context = bool(req.finding_context and req.finding_context.get("type") == "repository_scan")
     latest_scan = None if has_scan_context else await _load_latest_scan_context(
-        db, current_user.id, req.repository_id
+        db, current_user.id, req.repository_id,
+        repo_page=(req.finding_context or {}).get("repo_page") if req.finding_context else None,
     )
 
     # Build context
@@ -549,7 +587,8 @@ async def chat_ask_stream(
     # one). No repository selected → no repository data in the conversation.
     has_scan_context = bool(req.finding_context and req.finding_context.get("type") == "repository_scan")
     latest_scan = None if has_scan_context else await _load_latest_scan_context(
-        db, current_user.id, req.repository_id
+        db, current_user.id, req.repository_id,
+        repo_page=(req.finding_context or {}).get("repo_page") if req.finding_context else None,
     )
 
     # Build context

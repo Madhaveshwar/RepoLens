@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Union, Optional
 import asyncio
+import os
 import time
 from jose import jwt
 from passlib.context import CryptContext
@@ -21,14 +22,32 @@ from app.models.models import User
 # Hashing runs in a worker thread (asyncio.to_thread) so the event loop —
 # and therefore every concurrent API request — is never blocked by it.
 _ARGON2_TIME_COST = 3
-_ARGON2_MEMORY_COST = 64 * 1024  # KiB = 64 MiB
+_ARGON2_MEMORY_COST = 64 * 1024  # KiB = 64 MiB — documented policy constant
 _ARGON2_PARALLELISM = 2
+
+
+# Runtime allocation override: memory-constrained environments (CI runners,
+# small dev machines) can lower the argon2 working buffer via
+# ARGON2_MEMORY_COST_KIB so hash/verify never fail on VirtualAlloc under
+# memory pressure. The policy constant above is unchanged, and verification
+# of pre-existing hashes uses the parameters embedded in the hash string,
+# so correctness is unaffected. Unset → full 64 MiB (production default).
+def _resolve_argon2_memory_cost() -> int:
+    raw = os.getenv("ARGON2_MEMORY_COST_KIB")
+    if not raw:
+        return _ARGON2_MEMORY_COST
+    try:
+        val = int(raw)
+    except ValueError:
+        return _ARGON2_MEMORY_COST
+    return max(val, 8 * 1024)  # hard floor: 8 MiB
+
 
 pwd_context = CryptContext(
     schemes=["argon2"],
     deprecated="auto",
     argon2__time_cost=_ARGON2_TIME_COST,
-    argon2__memory_cost=_ARGON2_MEMORY_COST,
+    argon2__memory_cost=_resolve_argon2_memory_cost(),
     argon2__parallelism=_ARGON2_PARALLELISM,
 )
 

@@ -422,7 +422,7 @@ async def delete_repository(
     db: AsyncSession = Depends(get_async_db)
 ):
     import os
-    from app.models.models import Report, Analysis
+    from app.models.models import Report, Analysis, AnalysisResultCache
     logger.info(f"[Audit Log] User {current_user.id} requested deletion of Repository id: {id}")
     result = await db.execute(
         select(Repository).where(
@@ -447,7 +447,18 @@ async def delete_repository(
                 except Exception as e:
                     logger.error(f"Error removing report file: {e}")
                     
-    # 2. Hard delete Repository and cascade database entries
+    # 2. Purge the persistent scan-result cache for this repository FIRST.
+    # analysis_result_cache rows reference repositories.id; on PostgreSQL they
+    # have no ON DELETE CASCADE, so deleting the repo without purging cache
+    # rows raises an FK violation (delete fails / repo resurfaces on refresh).
+    # The ORM relationship cascade also removes them, but the explicit delete
+    # keeps the endpoint correct even for rows the session has not loaded.
+    from sqlalchemy import delete as _sa_delete
+    await db.execute(_sa_delete(AnalysisResultCache).where(AnalysisResultCache.repository_id == id))
+
+    # 3. Hard delete Repository — ORM cascade removes analyses, findings,
+    #    smells, tests, health scores, reports, PRs, snapshots, PR reviews,
+    #    commit analyses (and any remaining cache rows).
     await db.delete(repo)
     await db.commit()
     logger.info(f"[Audit Log] Successfully deleted repository {repo.name} and all associated scans/reports.")
